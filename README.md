@@ -311,70 +311,152 @@ Descriptor for a single field equation. Accumulates terms, BCs, and IC without i
 | `x` | `ndarray (nx,)` | 1D coordinate array in x |
 | `y` | `ndarray (ny,)` or `None` | 1D coordinate array in y. Passing this activates 2D mode. |
 
----
-
-#### `.add_advection(velocity=)` &nbsp;·&nbsp; `.add_advection(velocity_x=, velocity_y=)`
-
-Adds an advection term. All term-building methods return `self` for chaining.
-
-- **1D:** `−∂(c·φ)/∂x`
-- **2D:** `−∂(cx·φ)/∂x − ∂(cy·φ)/∂y`
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `velocity` | scalar \| ndarray \| callable | **1D only.** Advection speed `c(x, **fields)` |
-| `velocity_x` | scalar \| ndarray \| callable | **2D only.** x-component of velocity |
-| `velocity_y` | scalar \| ndarray \| callable | **2D only.** y-component of velocity |
+All term-building methods return `self` for chaining.
 
 ---
 
-#### `.add_diffusion(diffusivity=)` &nbsp;·&nbsp; `.add_diffusion(diffusivity_x=, diffusivity_y=)`
+#### `.add_advection(velocity=c)` · `.add_advection(velocity_x=cx, velocity_y=cy)`
 
-Adds a diffusion term using conservative central differences with face-averaged diffusivities.
+Adds the **convective form** of advection: `−c · ∂φ/∂x`. `c` is treated as the characteristic
+speed and sets the upwind direction via `sign(c)`. This is **not** the conservative form — use
+`add_flux` when your equation is a conservation law `∂u/∂t + ∂F(u)/∂x = 0`.
+
+- **1D:** adds `−c · ∂φ/∂x`
+- **2D:** adds `−cx · ∂φ/∂x − cy · ∂φ/∂y`
+
+```python
+# constant speed
+eq.add_advection(velocity=1.0)
+
+# spatially varying speed
+eq.add_advection(velocity=lambda x: np.sin(x))
+
+# coupled field as velocity (2D)
+eq_T.add_advection(velocity_x='u', velocity_y='v')
+```
+
+All velocity arguments accept: **scalar | ndarray | callable(x[,y], \*\*fields) | string field name**
+
+---
+
+#### `.add_diffusion(diffusivity=D)` · `.add_diffusion(diffusivity_x=Dx, diffusivity_y=Dy)`
+
+Adds conservative diffusion `∂(D·∂φ/∂x)/∂x` with face-averaged diffusivities. Handles
+constant, spatially varying, and field-dependent (nonlinear) diffusivity.
 
 - **1D:** `∂(D·∂φ/∂x)/∂x`
 - **2D isotropic:** `∂(D·∂φ/∂x)/∂x + ∂(D·∂φ/∂y)/∂y`
 - **2D anisotropic:** `∂(Dx·∂φ/∂x)/∂x + ∂(Dy·∂φ/∂y)/∂y`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `diffusivity` | scalar \| ndarray \| callable | Isotropic diffusivity `D(x[,y], **fields)` |
-| `diffusivity_x` | scalar \| ndarray \| callable | **2D anisotropic.** Diffusivity in x direction |
-| `diffusivity_y` | scalar \| ndarray \| callable | **2D anisotropic.** Diffusivity in y direction |
+```python
+eq.add_diffusion(diffusivity=0.01)                          # constant
+eq.add_diffusion(diffusivity=lambda x, T: 1.0 + T**2)      # nonlinear D(T)
+eq.add_diffusion(diffusivity_x=Dx, diffusivity_y=Dy)        # anisotropic 2D
+```
 
 ---
 
-#### `.add_source(expr)`
+#### `.add_source(expr=S)`
 
-Adds a pointwise source term added directly to the RHS. May reference other fields.
+Adds a pointwise source term `S(x[,y], **fields)` directly to the RHS. Can reference any
+coupled field by name.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `expr` | scalar \| ndarray \| callable | Source `S(x[,y], **fields)` |
+```python
+eq.add_source(expr=lambda x, cA, cB: -k * cA * cB)   # reaction sink
+eq.add_source(expr=5.0)                               # uniform source
+```
 
 ---
 
-#### `.add_flux(flux, scheme='upwind')` &nbsp;·&nbsp; *1D only*
+#### `.add_flux(flux=F)` · `.add_flux(flux_x=F, flux_y=G)`
 
-Escape hatch for a custom precomputed flux F. Adds `−∂F/∂x`.
+Adds the **conservative form** `−∂F(u)/∂x`. Use this for conservation laws where `F(u)` is
+a nonlinear function of the field. The wave speed `a(u) = dF/du` is inferred automatically
+via finite difference, and upwinding is based on `sign(a)` — **not** `sign(F)`.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `flux` | callable | `F(x, **fields)` → ndarray |
-| `scheme` | `'upwind'` \| `'central'` | Differencing scheme for `−∂F/∂x` |
+This is the correct tool for Burgers, traffic flow, shallow water, and similar equations.
+
+- **1D:** `−∂F(u)/∂x`
+- **2D:** `−∂F(u)/∂x − ∂G(u)/∂y`
+
+```python
+# Burgers: F(u) = u²/2,  wave speed a = u
+eq.add_flux(flux=lambda u: 0.5 * u**2)
+
+# Traffic flow: F(u) = u(1−u),  wave speed a = 1−2u  (changes sign at u=0.5)
+eq.add_flux(flux=lambda u: u * (1 - u))
+
+# 2D Burgers
+eq.add_flux(flux_x=lambda u: 0.5*u**2, flux_y=lambda u: 0.5*u**2)
+
+# Central scheme (no wave speed needed)
+eq.add_flux(flux=lambda u: 0.5*u**2, scheme='central')
+```
+
+Flux callables take the **field array directly**: `F(phi) -> ndarray`. Unlike other coefficient
+callables they do not receive `x`, `y`, or other fields.
+
+---
+
+#### `.add_term(fn)`
+
+Escape hatch for any term that doesn't fit the templates above. `fn` receives BC-aware
+differential operator closures injected by argument name. This allows writing the RHS in
+near-mathematical notation. See [Operator Reference](#operator-reference) for the full list.
+
+```python
+# Nonlinear scalar transport: -u*dT/dx + d(α(T)*dT/dx)/dx
+def rhs(u, T, Dx, Div_flux_x, Div_flux_y):
+    return -u * Dx(T, 'upwind', c=u) + Div_flux_x(alpha(T), T) + Div_flux_y(alpha(T), T)
+eq_T.add_term(rhs)
+
+# Pressure equation: dp/dt = -β(∂u/∂x + ∂v/∂y)
+eq_p.add_term(lambda u, v, Dx, Dy: -beta * (Dx(u) + Dy(v)))
+```
+
+`add_term` may be combined freely with `add_advection`, `add_diffusion`, etc. — contributions
+are summed.
 
 ---
 
 #### `.set_bc(kind, side=None, mask=None, value=None)`
 
-Sets a boundary condition. Multiple calls accumulate — they do not overwrite each other.
+Sets a boundary condition. Multiple calls accumulate.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `kind` | `'dirichlet'` \| `'neumann'` \| `'periodic'` | BC type |
-| `side` | `str` or `None` | Named edge shorthand. See [Side shortcuts](#side-shortcuts). |
-| `mask` | `bool ndarray` or `None` | Explicit boolean mask matching the field shape. Overrides `side=`. |
-| `value` | scalar \| `callable(t)` | Prescribed value (Dirichlet) or outward normal derivative (Neumann). Pass a callable for time-varying BCs. |
+| `kind` | Meaning | `value` |
+|--------|---------|---------|
+| `'dirichlet'` | Prescribed field value | scalar or `callable(t)` |
+| `'neumann'` | Prescribed outward normal derivative | scalar or `callable(t)` |
+| `'periodic'` | Wrap-around | — |
+
+```python
+eq.set_bc(side='left',  kind='dirichlet', value=1.0)
+eq.set_bc(side='right', kind='neumann',   value=0.0)   # insulating wall
+eq.set_bc(kind='periodic')                             # 1D periodic
+eq.set_bc(side='left',  kind='dirichlet', value=lambda t: np.sin(t))  # time-varying
+```
+
+**Side shortcuts:** `'left'`/`'right'` map to x-boundaries; `'bottom'`/`'top'` map to
+y-boundaries (2D only). For explicit control pass `mask=bool_array`.
+
+---
+
+#### `.set_interior_bc(mask, kind='dirichlet', value=None)`
+
+Marks an interior region as a solid obstacle or inclusion.
+
+```python
+cyl = (X - cx)**2 + (Y - cy)**2 <= r**2
+
+eq.set_interior_bc(cyl, kind='dirichlet', value=2.0)      # heated cylinder
+eq.set_interior_bc(cyl, kind='dirichlet', value=0.0)      # no-slip wall
+eq.set_interior_bc(cyl, kind='neumann')                   # insulating obstacle (approx.)
+eq.set_interior_bc(cyl, kind='dirichlet', value=lambda t: np.sin(t))  # oscillating
+```
+
+> **Note:** `kind='neumann'` freezes interior cells. This is a first-order approximation
+> sufficient for pressure obstacles. It does not rigorously enforce zero normal flux at
+> curved boundaries.
 
 ---
 
@@ -382,9 +464,12 @@ Sets a boundary condition. Multiple calls accumulate — they do not overwrite e
 
 Sets the initial condition.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ic` | scalar \| ndarray \| callable | Scalar: broadcast to whole grid. Array: shape `(nx,)` or `(nx, ny)`. Callable 1D: `ic(x)`. Callable 2D: `ic(x, y)` with meshgrid arrays. |
+```python
+eq.set_ic(0.0)                                    # uniform zero
+eq.set_ic(lambda x: np.sin(x))                    # 1D callable
+eq.set_ic(lambda x, y: np.sin(np.pi*x)*np.cos(y)) # 2D callable (meshgrid arrays)
+eq.set_ic(np.load('field.npy'))                   # from array
+```
 
 ---
 
@@ -394,42 +479,126 @@ Sets the initial condition.
 PDESystem(equations)
 ```
 
-Couples a list of PDE descriptors. Validates at construction time: no duplicate field names, consistent grid sizes, all callable field references declared.
+Couples a list of PDE descriptors, validates at construction time, and solves.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `equations` | `list[PDE]` | One or more PDE descriptors |
+#### `.solve(t_span, method='RK45', t_eval=None, **kwargs)`
 
----
-
-#### `.solve(t_span, ICs=None, method='RK45', t_eval=None, **kwargs)`
-
-Integrates the system. All extra keyword arguments are forwarded to `scipy.integrate.solve_ivp`.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `t_span` | `(float, float)` | Start and end time `(t0, tf)` |
-| `ICs` | `dict` or `None` | Override ICs per field: `{'T': array_or_callable}`. Takes priority over `eq.set_ic()`. |
-| `method` | `str` | Integrator. See [Choosing a Solver](#choosing-a-solver). |
-| `t_eval` | `ndarray` or `None` | Times at which to store output. If `None`, the integrator chooses its own steps. |
-| `rtol`, `atol` | `float` | Relative and absolute tolerances forwarded to `solve_ivp`. |
-| `max_step` | `float` | Maximum step size forwarded to `solve_ivp`. |
-
-**IC priority order:** `ICs` dict argument → `eq.set_ic()` → `ValueError`
+| Parameter | Description |
+|-----------|-------------|
+| `t_span` | `(t0, tf)` |
+| `method` | `'RK45'` (default), `'RK23'`, `'BDF'`, `'Radau'`, `'DOP853'` |
+| `t_eval` | Times at which to store output. If `None`, integrator chooses steps. |
+| `rtol`, `atol` | Tolerances forwarded to `solve_ivp`. |
 
 ---
 
 ### PDESolution
 
-Returned by `PDESystem.solve()`.
+| Attribute | Shape | Description |
+|-----------|-------|-------------|
+| `sol.<field>` | `(nx, nt)` or `(nx, ny, nt)` | Solution array accessed by field name |
+| `sol.t` | `(nt,)` | Time points |
+| `sol.success` | `bool` | Integrator converged |
+| `sol.message` | `str` | Integrator status |
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `sol.<field>` | ndarray | Solution for each field by name. Shape `(nx, nt)` in 1D, `(nx, ny, nt)` in 2D. |
-| `sol.t` | `ndarray (nt,)` | Time points at which solution was stored |
-| `sol.success` | `bool` | `True` if the integrator converged |
-| `sol.message` | `str` | Human-readable integrator status |
-| `sol.raw` | `OdeResult` | Full scipy `solve_ivp` result (dense output, events, step history) |
+---
+
+## Operator Reference
+
+uPDE exposes two levels of discretisation. Use `add_advection`/`add_diffusion`/`add_flux` for
+standard terms. Drop into `add_term` with injected operators for anything non-standard.
+
+### Level 1 — High-level methods
+
+| Method | Term | Form | Upwind direction |
+|--------|------|------|-----------------|
+| `add_advection(velocity=c)` | $-c\,\partial\phi/\partial x$ | Convective | `sign(c)` |
+| `add_advection(velocity_x=cx, velocity_y=cy)` | $-c_x\partial\phi/\partial x - c_y\partial\phi/\partial y$ | Convective | `sign(cx)`, `sign(cy)` |
+| `add_diffusion(diffusivity=D)` | $\nabla\cdot(D\nabla\phi)$ | Conservative central | — |
+| `add_diffusion(diffusivity_x=Dx, diffusivity_y=Dy)` | anisotropic version | Conservative central | — |
+| `add_source(expr=S)` | $S(x[,y], \texttt{**fields})$ | Pointwise | — |
+| `add_flux(flux=F)` | $-\partial F(\phi)/\partial x$ | Conservative | `sign(dF/dφ)` — inferred |
+| `add_flux(flux_x=F, flux_y=G)` | $-\partial F/\partial x - \partial G/\partial y$ | Conservative | `sign(dF/dφ)` — inferred |
+| `add_flux(..., scheme='central')` | same | Conservative central | — |
+
+**`add_advection` vs `add_flux`:** `add_advection` is the convective form $c\,\partial\phi/\partial x$
+and requires `c` to be the true characteristic speed. `add_flux` is the conservation form
+$\partial F(\phi)/\partial x$ where the wave speed is $dF/d\phi$ — which may differ from $F/\phi$
+when $F$ is nonlinear. For Burgers ($F = u^2/2$) the wave speed is $u$, not $u/2$.
+
+### Level 2 — Injected operators for `add_term`
+
+When `add_term(fn)` is called, uPDE inspects the argument names of `fn` and injects a
+BC-aware operator closure for each recognised name. Field arrays from the coupled system
+are also injected by name. All operators are **2nd-order central** unless noted.
+
+**`phi`, `c`, `k`** each accept: ndarray · scalar · string field name.
+
+**Hard rule: never nest operators.** Write `Dxx(phi)` not `Dx(Dx(phi))` — the intermediate
+array carries no BC information and the result will be wrong at boundaries.
+
+#### First derivatives
+
+| Operator | Term | Scheme | Notes |
+|----------|------|--------|-------|
+| `Dx(phi)` | $\partial\phi/\partial x$ | 2nd-order central | 1D and 2D |
+| `Dx(phi, 'upwind', c=v)` | $\partial\phi/\partial x$ | 1st-order upwind on `sign(v)` | 1D and 2D |
+| `Dy(phi)` | $\partial\phi/\partial y$ | 2nd-order central | 2D only |
+| `Dy(phi, 'upwind', c=v)` | $\partial\phi/\partial y$ | 1st-order upwind on `sign(v)` | 2D only |
+
+```python
+# Pressure gradient
+eq.add_term(lambda p, Dx, Dy: -(1/rho) * Dx(p))
+
+# Upwind convective advection: u*∂T/∂x + v*∂T/∂y
+eq.add_term(lambda u, v, T, Dx, Dy:
+    -u * Dx(T, 'upwind', c=u) - v * Dy(T, 'upwind', c=v))
+```
+
+#### Second derivatives
+
+| Operator | Term | Scheme | Notes |
+|----------|------|--------|-------|
+| `Dxx(phi)` | $\partial^2\phi/\partial x^2$ | 2nd-order central, Dirichlet ghost | 1D and 2D |
+| `Dyy(phi)` | $\partial^2\phi/\partial y^2$ | 2nd-order central, Dirichlet ghost | 2D only |
+
+```python
+# Laplacian with explicit viscosity
+eq.add_term(lambda u, Dxx, Dyy: nu * (Dxx(u) + Dyy(u)))
+```
+
+#### Conservative flux divergence
+
+| Operator | Term | Scheme | Notes |
+|----------|------|--------|-------|
+| `Div_x(c, phi)` | $-\partial(c\,\phi)/\partial x$ | 2nd-order central | 1D and 2D |
+| `Div_y(c, phi)` | $-\partial(c\,\phi)/\partial y$ | 2nd-order central | 2D only |
+| `Div_flux_x(k, phi)` | $\partial(k\,\partial\phi/\partial x)/\partial x$ | Conservative central | 1D and 2D |
+| `Div_flux_y(k, phi)` | $\partial(k\,\partial\phi/\partial y)/\partial y$ | Conservative central | 2D only |
+
+```python
+# Continuity / divergence of velocity
+eq_p.add_term(lambda u, v, Div_x, Div_y: Div_x(1.0, u) + Div_y(1.0, v))
+
+# Variable diffusivity written explicitly
+eq.add_term(lambda T, Div_flux_x, Div_flux_y:
+    Div_flux_x(alpha(T), T) + Div_flux_y(alpha(T), T))
+```
+
+`Div_x`/`Div_y` are the central conservative divergence — no upwinding. Use
+`add_flux` or `Dx(phi, 'upwind', c=v)` when you need upwinding.
+
+### Coefficient conventions
+
+All high-level method coefficients and `add_term` field arguments accept:
+
+| Type | Example | Behaviour |
+|------|---------|-----------|
+| Scalar | `1.0` | Broadcast to grid |
+| ndarray | `D_array` | Used directly |
+| `callable(x, **fields)` | `lambda x, T: 1+T**2` | Called each timestep |
+| `callable(x, y, **fields)` | `lambda x, y, T: ...` | 2D version |
+| String field name | `'u'` | Looked up from coupled system each timestep |
 
 ---
 
@@ -437,7 +606,7 @@ Returned by `PDESystem.solve()`.
 
 ### Linear Advection
 
-A Gaussian pulse at speed c=1 with periodic BCs — the pulse should return to its starting position at t = 2π.
+Gaussian pulse at speed `c=1` with periodic BCs — returns to start at `t = 2π`.
 
 ```python
 x  = np.linspace(0, 2*np.pi, 256)
@@ -448,38 +617,52 @@ eq.add_advection(velocity=1.0)
 eq.set_bc(kind='periodic')
 eq.set_ic(ic)
 
-sol = PDESystem([eq]).solve(
-    t_span=(0, 6),
-    method='RK23',
-    t_eval=np.linspace(0, 6, 120))
+sol = PDESystem([eq]).solve(t_span=(0, 6), method='RK45',
+                             t_eval=np.linspace(0, 6, 120))
 ```
 
 ---
 
-### Viscous Burgers Equation
+### Burgers Equation — Conservation Form
 
-Nonlinear advection with self-advection velocity c = u. The self-steepening term forms a near-shock which the small viscosity regularises.
+`F(u) = u²/2`, wave speed `a = u`. Use `add_flux` so upwinding is based on `sign(u)`, not `sign(F)`.
 
 ```python
-x = np.linspace(0, 2*np.pi, 512)
+x = np.linspace(0, 2*np.pi, 512, endpoint=False)
 
 eq = PDE('u', x=x)
-eq.add_advection(velocity=lambda x, u: u)   # c = u(x, t)
+eq.add_flux(flux=lambda u: 0.5 * u**2)
 eq.add_diffusion(diffusivity=0.005)
 eq.set_bc(kind='periodic')
-eq.set_ic(np.sin(x) + 0.5*np.sin(2*x))
+eq.set_ic(np.sin(x))
 
-sol = PDESystem([eq]).solve(
-    t_span=(0, 3),
-    method='RK45',
-    t_eval=np.linspace(0, 3, 100))
+sol = PDESystem([eq]).solve(t_span=(0, 3), method='RK45',
+                             t_eval=np.linspace(0, 3, 100))
+```
+
+---
+
+### Traffic Flow — Nonlinear Conservation Law
+
+`F(u) = u(1−u)`, wave speed `a = 1−2u` — changes sign at `u = 0.5`.
+`add_flux` handles this correctly; `add_advection` would not.
+
+```python
+x = np.linspace(0, 1, 256, endpoint=False)
+
+eq = PDE('rho', x=x)
+eq.add_flux(flux=lambda rho: rho * (1 - rho))
+eq.set_bc(kind='periodic')
+eq.set_ic(0.3 + 0.2 * np.sin(2 * np.pi * x))
+
+sol = PDESystem([eq]).solve(t_span=(0, 1), method='RK45')
 ```
 
 ---
 
 ### Reaction-Diffusion A + B → C
 
-Three coupled species diffusing in from opposite ends and reacting where they meet. All three equations must be solved jointly because the source terms couple them.
+Three coupled species diffusing in from opposite ends and reacting where they meet.
 
 ```python
 x  = np.linspace(0, 1, 256)
@@ -487,28 +670,27 @@ k1 = 10.0
 
 eqA = PDE('cA', x=x)
 eqA.add_diffusion(diffusivity=1.0)
-eqA.add_source(expr=lambda x, cA, cB, cC: -k1 * cA * cB)
+eqA.add_source(expr=lambda x, cA, cB: -k1 * cA * cB)
 eqA.set_bc(side='left',  kind='dirichlet', value=5.0)
 eqA.set_bc(side='right', kind='dirichlet', value=0.0)
 eqA.set_ic(0.0)
 
 eqB = PDE('cB', x=x)
 eqB.add_diffusion(diffusivity=1.0)
-eqB.add_source(expr=lambda x, cA, cB, cC: -k1 * cA * cB)
+eqB.add_source(expr=lambda x, cA, cB: -k1 * cA * cB)
 eqB.set_bc(side='left',  kind='dirichlet', value=0.0)
 eqB.set_bc(side='right', kind='dirichlet', value=3.0)
 eqB.set_ic(0.0)
 
 eqC = PDE('cC', x=x)
 eqC.add_diffusion(diffusivity=1.0)
-eqC.add_source(expr=lambda x, cA, cB, cC: +k1 * cA * cB)
+eqC.add_source(expr=lambda x, cA, cB: +k1 * cA * cB)
 eqC.set_bc(side='left',  kind='dirichlet', value=0.0)
 eqC.set_bc(side='right', kind='dirichlet', value=0.0)
 eqC.set_ic(0.0)
 
-sol = PDESystem([eqA, eqB, eqC]).solve(
-    t_span=(0, 0.5), method='RK45', rtol=1e-6, atol=1e-8)
-
+sol = PDESystem([eqA, eqB, eqC]).solve(t_span=(0, 0.5), method='RK45',
+                                        rtol=1e-6, atol=1e-8)
 # sol.cA, sol.cB, sol.cC — each shape (256, nt)
 ```
 
@@ -516,7 +698,7 @@ sol = PDESystem([eqA, eqB, eqC]).solve(
 
 ### 2D Heat Equation
 
-Constant diffusivity on a unit square, Dirichlet left/right walls, insulating top/bottom. Steady state: T = 1 − x.
+Constant diffusivity on a unit square. Steady state: `T = 1 − x`.
 
 ```python
 x = np.linspace(0, 1, 64)
@@ -530,22 +712,19 @@ eq.set_bc(side='bottom', kind='neumann',   value=0.0)
 eq.set_bc(side='top',    kind='neumann',   value=0.0)
 eq.set_ic(0.0)
 
-sol = PDESystem([eq]).solve(
-    t_span=(0, 1),
-    method='BDF',          # BDF required — 2D diffusion is stiff
-    rtol=1e-4, atol=1e-6,
-    t_eval=np.linspace(0, 1, 10))
-
+sol = PDESystem([eq]).solve(t_span=(0, 1), method='BDF',
+                             rtol=1e-4, atol=1e-6,
+                             t_eval=np.linspace(0, 1, 10))
 # sol.T.shape == (64, 64, 10)
 # sol.T[:, :, -1]   final 2D field
-# sol.T[:, 32, -1]  profile at y = 0.5
+# sol.T[:, 32, -1]  centreline profile
 ```
 
 ---
 
 ### 2D Nonlinear Diffusion
 
-Field-dependent diffusivity κ(T) = 1 + T² — regions with high T diffuse faster.
+Field-dependent diffusivity `κ(T) = 1 + T²`.
 
 ```python
 x = np.linspace(0, 1, 48)
@@ -559,100 +738,138 @@ eq.set_bc(side='bottom', kind='neumann',   value=0.0)
 eq.set_bc(side='top',    kind='neumann',   value=0.0)
 eq.set_ic(0.0)
 
-sol = PDESystem([eq]).solve(
-    t_span=(0, 0.5), method='BDF', rtol=1e-4, atol=1e-6)
+sol = PDESystem([eq]).solve(t_span=(0, 0.5), method='BDF',
+                             rtol=1e-4, atol=1e-6)
 ```
 
 ---
 
-### 2D Custom Mask BC
+### Scalar Transport with Temperature-Dependent Diffusivity — `add_term`
 
-Two heating strips at different temperatures on the left wall, with all remaining edges insulating.
+Combines upwind convection and nonlinear diffusion in a single `add_term` callable.
+
+```python
+alpha = lambda T: 0.01 * (1 + T**2)
+
+def rhs(u, v, T, Dx, Dy, Div_flux_x, Div_flux_y):
+    adv  = u * Dx(T, 'upwind', c=u) + v * Dy(T, 'upwind', c=v)
+    diff = Div_flux_x(alpha(T), T) + Div_flux_y(alpha(T), T)
+    return -adv + diff
+
+eq_T.add_term(rhs)
+```
+
+---
+
+### 2D Heated Cylinder (Interior BC)
+
+Cylinder held at `T = 2`, outer walls cold.
 
 ```python
 nx, ny = 64, 64
-x = np.linspace(0, 1, nx)
-y = np.linspace(0, 1, ny)
-
-hot  = np.zeros((nx, ny), dtype=bool)
-cold = np.zeros((nx, ny), dtype=bool)
-
-hot[0, :ny//3]          = True   # bottom third — hot
-hot[0, 2*ny//3:]        = True   # top third    — hot
-cold[0, ny//3:2*ny//3] = True   # middle third — cold
+x = np.linspace(0, 4, nx)
+y = np.linspace(0, 4, ny)
+X, Y = np.meshgrid(x, y, indexing='ij')
+cyl = (X - 2.0)**2 + (Y - 2.0)**2 <= 0.5**2
 
 eq = PDE('T', x=x, y=y)
-eq.add_diffusion(diffusivity=0.05)
-eq.set_bc(mask=hot,  kind='dirichlet', value=2.0)
-eq.set_bc(mask=cold, kind='dirichlet', value=0.0)
-eq.set_bc(side='right',  kind='neumann', value=0.0)
-eq.set_bc(side='bottom', kind='neumann', value=0.0)
-eq.set_bc(side='top',    kind='neumann', value=0.0)
+eq.add_diffusion(diffusivity=0.1)
+eq.set_bc(side='left',   kind='dirichlet', value=0.0)
+eq.set_bc(side='right',  kind='dirichlet', value=0.0)
+eq.set_bc(side='bottom', kind='neumann',   value=0.0)
+eq.set_bc(side='top',    kind='neumann',   value=0.0)
+eq.set_interior_bc(cyl, kind='dirichlet', value=2.0)
 eq.set_ic(0.0)
 
-sol = PDESystem([eq]).solve(
-    t_span=(0, 2), method='BDF', rtol=1e-4, atol=1e-6)
+sol = PDESystem([eq]).solve(t_span=(0, 5), method='BDF',
+                             rtol=1e-4, atol=1e-6)
 ```
 
 ---
 
 ## Numerical Methods
 
-### Advection — first-order upwind
+### `add_advection` — convective upwind
 
-The advection term −∂(cφ)/∂x is discretised using a first-order upwind scheme that selects the stencil direction based on the sign of c:
-
-```
-dF/dx ≈  (F_i − F_{i−1}) / Δx    if c ≥ 0   (backward difference)
-         (F_{i+1} − F_i) / Δx    if c < 0   (forward difference)
-```
-
-In 2D, x- and y-sweeps are applied independently. The 1D stencil uses `numpy.roll`; the 2D stencil uses ghost-cell padding (see below).
-
-### Diffusion — conservative central differences
-
-The diffusion term ∂(D·∂φ/∂x)/∂x is discretised in conservative form with face-averaged diffusivities:
+`add_advection(velocity=c)` discretises `c · ∂φ/∂x` with a first-order upwind stencil,
+choosing direction based on `sign(c)`:
 
 ```
-[∂(D∂φ/∂x)/∂x]_i ≈ (D_{i+½}(φ_{i+1}−φ_i) − D_{i−½}(φ_i−φ_{i−1})) / Δx²
+∂φ/∂x ≈  (φ_i − φ_{i−1}) / Δx    if c ≥ 0   (backward)
+          (φ_{i+1} − φ_i) / Δx    if c < 0   (forward)
+```
 
+`c` must be the true characteristic speed of the equation. For variable-coefficient
+advection `c = c(x,t)`, the convective and conservative forms differ by `φ ∂c/∂x` and
+are **not** equivalent unless `c` is spatially uniform.
+
+### `add_flux` — conservation-law upwind
+
+`add_flux(flux=F)` discretises `∂F(φ)/∂x` for a nonlinear conservation law. The wave
+speed `a(φ) = dF/dφ` is inferred via forward finite difference, and upwinding is based
+on `sign(a)` — not `sign(F)`. Donor-cell scheme:
+
+```
+F_{i+½} = F_i      if a_i ≥ 0
+           F_{i+1}  if a_i < 0
+dF/dx ≈ (F_{i+½} − F_{i-½}) / Δx
+```
+
+This correctly handles nonlinear fluxes where the wave speed changes sign, such as
+traffic flow `F = ρ(1−ρ)` with `a = 1−2ρ`.
+
+### `add_diffusion` — conservative central differences
+
+```
+[∂(D ∂φ/∂x)/∂x]_i ≈ (D_{i+½}(φ_{i+1}−φ_i) − D_{i−½}(φ_i−φ_{i−1})) / Δx²
 D_{i+½} = ½(D_i + D_{i+1})
 ```
 
-Using face averages rather than nodal values ensures conservation and correctness for nonlinear D(φ).
+Face-averaged diffusivities ensure conservation and correctness for nonlinear `D(φ)`.
 
-### Ghost-cell padding for non-periodic boundaries
+### `add_term` operators — all central
 
-`numpy.roll` wraps arrays cyclically — correct for periodic BCs but dangerous otherwise. In 2D, the left wall would receive a ghost from the right wall, injecting a large spurious flux that causes immediate blow-up.
+All injected operators (`Dx`, `Dy`, `Dxx`, `Dyy`, `Div_x`, `Div_y`, `Div_flux_x`,
+`Div_flux_y`) use 2nd-order central differences. For upwinding within `add_term` use
+`Dx(phi, 'upwind', c=v)` or `Dy(phi, 'upwind', c=v)` explicitly.
 
-uPDE pads the array with a ghost layer before applying each stencil. For non-periodic boundaries the ghost replicates the boundary value (zero gradient). The actual BC enforcement — zeroing Dirichlet rows, correcting Neumann rows — happens in `_apply_bcs` after the stencil.
+### Ghost-cell padding
 
-### Dirichlet BCs — time-derivative formulation
+`numpy.roll` wraps arrays cyclically — wrong for non-periodic boundaries. uPDE pads
+arrays with a ghost layer before each stencil. Ghost values replicate the boundary
+(zero-gradient) for non-periodic edges. Dirichlet ghost values are reflected as
+`ghost = 2·g − φ_bnd` for second-derivative operators. Actual BC enforcement
+(zeroing Dirichlet rows, correcting Neumann rows) runs after stencil evaluation.
 
-Rather than pinning boundary nodes to a fixed value, uPDE sets the RHS at Dirichlet nodes to dg/dt. For constant BCs this is zero; for time-varying g(t) it is estimated by finite difference with Δt = 10⁻⁸. This lets the ODE integrator treat all nodes uniformly.
+---
+
+## Choosing a Solver
+
+| Problem | Recommended | Why |
+|---------|-------------|-----|
+| Pure advection | `RK45` | Explicit, non-stiff |
+| Advection + mild diffusion | `RK45` | CFL limit manageable |
+| Diffusion-dominated 1D | `RK45` or `BDF` | Depends on grid resolution |
+| Diffusion-dominated 2D | `BDF` or `Radau` | 2D stiffness ∝ 1/Δx² |
+| Stiff reaction-diffusion | `BDF` or `Radau` | Fast reaction timescales |
+| Nonlinear conservation laws | `RK45` | Explicit fine for MOL |
+
+> **2D blow-up?** Almost always stiffness. Switch `method='RK45'` → `method='BDF'`.
+> The explicit stability limit for 2D diffusion scales as Δt ~ Δx², which becomes
+> extremely restrictive on fine grids.
 
 ---
 
 ## Troubleshooting
 
 **Solution blows up immediately in 2D**
-Almost certainly a stiffness issue. Switch from `method='RK45'` to `method='BDF'`. The explicit stability limit for 2D diffusion scales as Δt ∼ Δx², which becomes very restrictive on fine grids.
+Switch to `method='BDF'`. Explicit methods require Δt ~ Δx² for diffusion — impractical on fine grids.
 
-**`ValueError: undeclared field(s)`**
-A callable references a field name not declared in the system. Check for typos — field names are case-sensitive. Every name used in a lambda (other than `x`, `y`, `t`) must match a field declared in one of the equations passed to `PDESystem`.
+**`ValueError: unknown field reference 'u'`**
+A callable references a field name not declared in the system. Make sure all fields are passed to `PDESystem`.
 
-**`ValueError: no initial condition for field X`**
-Either call `eq.set_ic(...)` on the equation, or pass `ICs={'X': value}` to `PDESystem.solve()`.
+**Upwinding gives diffusive results**
+First-order upwind adds numerical diffusion ∝ Δx. Refine the grid or add a small physical diffusion term to regularise.
 
-**`sol.success` is `False`**
-Check `sol.message` for the integrator's error. Common causes: tolerances too tight, step-size limit hit (try relaxing `rtol`/`atol`), or a genuinely ill-posed problem (negative diffusivity, unbounded source term).
-
-**Neumann BC has no visible effect**
-For `value=0.0`, the ghost-cell default already gives zero-flux — no correction is applied. Non-zero Neumann values are corrected automatically in `_apply_bcs`. If you see unexpected behaviour with a `mask=`-based Neumann BC, use `side=` instead so the outward normal direction is unambiguous.
-
-**Periodic BCs in 2D cause unexpected wrapping**
-`set_bc(kind='periodic')` without `side=` defaults to fully periodic (`side='all'`). For periodicity in only one direction, use `side='x'` or `side='y'` explicitly.
-
----
-
-*uPDE — method of lines on top of SciPy · pure NumPy · no compilation required*
+**`add_flux` gives wrong results for linear advection**
+Use `add_advection` for linear advection `c · ∂u/∂x`. `add_flux` is for conservation laws `∂F(u)/∂x` and infers the wave speed numerically, which adds unnecessary overhead and rounding for the linear case.
