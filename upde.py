@@ -80,9 +80,24 @@ def _to_callable(val):
     Normalise a coefficient/expr to a callable f(x, **fields) (1D)
     or f(x, y, **fields) (2D).  The callable convention is detected
     at call time by _call(); here we just wrap scalars and arrays.
+
+    String values are treated as field name references: the returned
+    callable looks the name up in **fields at call time, so passing
+    e.g. velocity_x='u' works for coupled-field advection.
     """
     if callable(val):
         return val
+    if isinstance(val, str):
+        name = val
+        def _field_ref(x, *args, **kw):
+            if name not in kw:
+                raise KeyError(
+                    f"Field reference '{name}' not found in system fields. "
+                    f"Available: {list(kw.keys())}"
+                )
+            return kw[name]
+        _field_ref._field_ref_name = name   # tag for validation
+        return _field_ref
     if np.isscalar(val):
         def _const(x, *args, **kw):
             return np.full_like(x, float(val))
@@ -93,7 +108,7 @@ def _to_callable(val):
             return arr
         return _arr
     raise TypeError(
-        f"Coefficient must be scalar, ndarray, or callable; got {type(val)}"
+        f"Coefficient must be scalar, ndarray, callable, or field-name string; got {type(val)}"
     )
 
 
@@ -121,12 +136,12 @@ def _call(fn, coords, fields):
 def _callable_field_refs(fn):
     """
     Return parameter names of fn that look like field references
-    (not 'x', 'y', 't', and not *args / **kwargs).
+    (not 'x', 'y', 't', operator names, and not *args / **kwargs).
     """
     if not callable(fn):
         return set()
     sig    = inspect.signature(fn)
-    ignore = {'x', 'y', 't'}
+    ignore = {'x', 'y', 't', 'Dx', 'Dy', 'Dxx', 'Dyy', 'Div_x', 'Div_y', 'Div_flux_x', 'Div_flux_y'}
     return {
         name
         for name, p in sig.parameters.items()
@@ -136,6 +151,192 @@ def _callable_field_refs(fn):
             inspect.Parameter.VAR_KEYWORD,
         )
     }
+
+
+# ---------------------------------------------------------------------------
+# Differential operators — BC-aware, injected into add_term callables
+# ---------------------------------------------------------------------------
+
+def _build_operators(eq, fields_nd, bct):
+    """
+    Build BC-aware differential operators for use inside add_term callables.
+
+    Returns a dict with keys:
+      Dx, Dy       — first derivative, central differences
+      Dxx, Dyy     — second derivative, central differences
+                     Use these instead of Dx(Dx(phi)) — nesting Dx is wrong
+                     because the intermediate array has no BC information.
+      Div_x, Div_y — central flux divergence -d(c*phi)/d{x,y}
+
+    phi / c may each be:
+      - ndarray of shape (nx,) or (nx,ny)
+      - a string field name  (looked up in fields_nd at eval time)
+      - a scalar             (broadcast to grid shape)
+    """
+    def _resolve(phi):
+        if isinstance(phi, str):
+            return fields_nd[phi]
+        if np.isscalar(phi):
+            shape = (eq.nx, eq.ny) if eq.is_2d else (eq.nx,)
+            return np.full(shape, float(phi))
+        return phi
+
+    def _bc_val(normal, t=0.0):
+        """Get prescribed BC value for a given normal direction, or 0."""
+        for bc in eq._bcs:
+            if bc.normal == normal and bc.kind == 'dirichlet':
+                return bc.get_value(t)
+        return 0.0
+
+    if eq.is_2d:
+        dx, dy = eq.dx, eq.dy
+
+        def Dx(phi, scheme='central', c=None):
+            """∂phi/∂x. scheme='central' (default) or 'upwind' (requires c)."""
+            phi = _resolve(phi)
+            n   = phi.shape[0]
+            phi_ext = _ghost_pad(phi, axis=0, bc_lo=bct['x-'], bc_hi=bct['x+'])
+            phi_c = np.take(phi_ext, range(1, n+1), axis=0)
+            phi_r = np.take(phi_ext, range(2, n+2), axis=0)
+            phi_l = np.take(phi_ext, range(0, n),   axis=0)
+            if scheme == 'central':
+                return (phi_r - phi_l) / (2.0 * dx)
+            elif scheme == 'upwind':
+                if c is None:
+                    raise ValueError("Dx(..., scheme='upwind') requires c=velocity")
+                c = _resolve(c)
+                return np.where(c >= 0, (phi_c - phi_l) / dx,
+                                        (phi_r - phi_c) / dx)
+            else:
+                raise ValueError(f"scheme must be 'central' or 'upwind'; got '{scheme}'")
+
+        def Dy(phi, scheme='central', c=None):
+            """∂phi/∂y. scheme='central' (default) or 'upwind' (requires c)."""
+            phi = _resolve(phi)
+            n   = phi.shape[1]
+            phi_ext = _ghost_pad(phi, axis=1, bc_lo=bct['y-'], bc_hi=bct['y+'])
+            phi_c = np.take(phi_ext, range(1, n+1), axis=1)
+            phi_r = np.take(phi_ext, range(2, n+2), axis=1)
+            phi_l = np.take(phi_ext, range(0, n),   axis=1)
+            if scheme == 'central':
+                return (phi_r - phi_l) / (2.0 * dy)
+            elif scheme == 'upwind':
+                if c is None:
+                    raise ValueError("Dy(..., scheme='upwind') requires c=velocity")
+                c = _resolve(c)
+                return np.where(c >= 0, (phi_c - phi_l) / dy,
+                                        (phi_r - phi_c) / dy)
+            else:
+                raise ValueError(f"scheme must be 'central' or 'upwind'; got '{scheme}'")
+
+        def Dxx(phi):
+            phi    = _resolve(phi)
+            n      = phi.shape[0]
+            padded = _ghost_pad_dirichlet(phi, axis=0,
+                         bc_lo=bct['x-'], bc_hi=bct['x+'],
+                         val_lo=_bc_val('x-'), val_hi=_bc_val('x+'))
+            r = np.take(padded, range(2, n+2), axis=0)
+            c = np.take(padded, range(1, n+1), axis=0)
+            l = np.take(padded, range(0, n),   axis=0)
+            return (r - 2*c + l) / dx**2
+
+        def Dyy(phi):
+            phi    = _resolve(phi)
+            n      = phi.shape[1]
+            padded = _ghost_pad_dirichlet(phi, axis=1,
+                         bc_lo=bct['y-'], bc_hi=bct['y+'],
+                         val_lo=_bc_val('y-'), val_hi=_bc_val('y+'))
+            r = np.take(padded, range(2, n+2), axis=1)
+            c = np.take(padded, range(1, n+1), axis=1)
+            l = np.take(padded, range(0, n),   axis=1)
+            return (r - 2*c + l) / dy**2
+
+        def Div_x(c, phi):
+            """-d(c*phi)/dx, central differences."""
+            cp  = _resolve(c) * _resolve(phi)
+            n   = cp.shape[0]
+            ext = _ghost_pad(cp, axis=0, bc_lo=bct['x-'], bc_hi=bct['x+'])
+            r   = np.take(ext, range(2, n+2), axis=0)
+            l   = np.take(ext, range(0, n),   axis=0)
+            return -(r - l) / (2.0 * dx)
+
+        def Div_y(c, phi):
+            """-d(c*phi)/dy, central differences."""
+            cp  = _resolve(c) * _resolve(phi)
+            n   = cp.shape[1]
+            ext = _ghost_pad(cp, axis=1, bc_lo=bct['y-'], bc_hi=bct['y+'])
+            r   = np.take(ext, range(2, n+2), axis=1)
+            l   = np.take(ext, range(0, n),   axis=1)
+            return -(r - l) / (2.0 * dy)
+
+        def Div_flux_x(k, phi):
+            return _diffuse_2d(_resolve(phi), _resolve(k), dx, axis=0,
+                               bc_lo=bct['x-'], bc_hi=bct['x+'])
+
+        def Div_flux_y(k, phi):
+            return _diffuse_2d(_resolve(phi), _resolve(k), dy, axis=1,
+                               bc_lo=bct['y-'], bc_hi=bct['y+'])
+
+    else:
+        dx    = eq.dx
+        bc_lo = 'periodic' if any(bc.kind == 'periodic' for bc in eq._bcs) \
+                else 'none'
+        bc_hi = bc_lo
+        # get Dirichlet values for 1D
+        val_lo = next((bc.get_value(0) for bc in eq._bcs
+                       if bc.kind == 'dirichlet' and bc.mask[0]),  0.0)
+        val_hi = next((bc.get_value(0) for bc in eq._bcs
+                       if bc.kind == 'dirichlet' and bc.mask[-1]), 0.0)
+        bc_lo_d = 'dirichlet' if any(
+            bc.kind == 'dirichlet' and bc.mask[0]  for bc in eq._bcs) else bc_lo
+        bc_hi_d = 'dirichlet' if any(
+            bc.kind == 'dirichlet' and bc.mask[-1] for bc in eq._bcs) else bc_hi
+
+        def Dx(phi, scheme='central', c=None):
+            """∂phi/∂x. scheme='central' (default) or 'upwind' (requires c)."""
+            phi = _resolve(phi).reshape(-1)
+            p   = _ghost_pad(phi, 0, bc_lo, bc_hi)
+            if scheme == 'central':
+                return (p[2:] - p[:-2]) / (2.0 * dx)
+            elif scheme == 'upwind':
+                if c is None:
+                    raise ValueError("Dx(..., scheme='upwind') requires c=velocity")
+                c = _resolve(c).reshape(-1)
+                return np.where(c >= 0, (phi - p[:-2]) / dx,
+                                        (p[2:] - phi)  / dx)
+            else:
+                raise ValueError(f"scheme must be 'central' or 'upwind'; got '{scheme}'")
+
+        def Dy(phi, scheme='central', c=None):
+            raise NotImplementedError("Dy is not defined for 1D problems.")
+
+        def Dxx(phi):
+            p = _ghost_pad_dirichlet(_resolve(phi).reshape(-1), 0,
+                                     bc_lo_d, bc_hi_d, val_lo, val_hi)
+            return (p[2:] - 2*p[1:-1] + p[:-2]) / dx**2
+
+        def Dyy(phi):
+            raise NotImplementedError("Dyy is not defined for 1D problems.")
+
+        def Div_x(c, phi):
+            """-d(c*phi)/dx, central differences."""
+            cp = _resolve(c) * _resolve(phi)
+            p  = _ghost_pad(cp, 0, bc_lo, bc_hi)
+            return -(p[2:] - p[:-2]) / (2.0 * dx)
+
+        def Div_y(c, phi):
+            raise NotImplementedError("Div_y is not defined for 1D problems.")
+
+        def Div_flux_x(k, phi):
+            return _diffuse_1d(_resolve(phi), _resolve(k), dx)
+
+        def Div_flux_y(k, phi):
+            raise NotImplementedError("Div_flux_y is not defined for 1D problems.")
+
+    return {'Dx': Dx, 'Dy': Dy, 'Dxx': Dxx, 'Dyy': Dyy,
+            'Div_x': Div_x, 'Div_y': Div_y,
+            'Div_flux_x': Div_flux_x, 'Div_flux_y': Div_flux_y}
+
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +377,13 @@ class _InteriorBC:
     Descriptor for an interior region (obstacle / inclusion).
 
     kind    : 'dirichlet' — fix the field value inside the mask
-              'neumann'   — zero-flux approximation (inactive cells:
-                            RHS zeroed, neighbours see the fixed value
-                            at their stencil interface)
+              'neumann'   — approximate zero-flux: interior cells are frozen
+                            (rhs=0). NOTE: this is a first-order approximation.
+                            The fluid stencil at interface cells still reaches
+                            into the frozen solid, so the no-flux condition is
+                            only weakly enforced. Sufficient for pressure in NS
+                            and coarse thermal insulation, but not accurate for
+                            sharp flux-free boundaries.
     mask    : bool ndarray matching the field shape — True = interior/solid
     value   : scalar | callable(t) | callable(x[,y])  (Dirichlet only)
     """
@@ -205,7 +410,7 @@ class _InteriorBC:
                 # value is a spatial callable — cannot evaluate at t alone;
                 # return None to signal spatial evaluation needed
                 return None
-        return float(self.value)
+
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +522,7 @@ class PDE:
         self._diffusion    = []
         self._sources      = []
         self._fluxes       = []
+        self._generic_terms = []  # list of callables added via add_term()
         self._bcs          = []
         self._interior_bcs = []   # list of _InteriorBC
         self._ic           = None
@@ -327,14 +533,20 @@ class PDE:
 
     def add_advection(self, velocity=None, velocity_x=None, velocity_y=None):
         """
-        Add advection term(s).
+        Add convective advection term  c * d(phi)/d{x,y}  with first-order upwinding.
 
-        1D : add_advection(velocity=...)
-             Adds  -d(c·phi)/dx
+        The velocity c is the characteristic speed and sets the upwind direction
+        via sign(c).  This is the strictly convective (non-conservative) form.
+        Use add_flux() for conservation-law form  d(F(u))/dx.
 
-        2D : add_advection(velocity_x=..., velocity_y=...)
-             Adds  -d(cx·phi)/dx - d(cy·phi)/dy
-             velocity_x and velocity_y may each be scalar|ndarray|callable(x,y,**fields)
+        1D : add_advection(velocity=c)
+             Adds  -c * dphi/dx   (upwind on sign(c))
+
+        2D : add_advection(velocity_x=cx, velocity_y=cy)
+             Adds  -cx * dphi/dx - cy * dphi/dy
+
+        velocity / velocity_x / velocity_y may each be:
+            scalar | ndarray | callable(x[,y], **fields) | string field name
         """
         if self.is_2d:
             if velocity_x is None and velocity_y is None:
@@ -392,19 +604,108 @@ class PDE:
         self._sources.append({'expr': _to_callable(expr)})
         return self
 
-    def add_flux(self, flux, scheme='upwind'):
+    def add_flux(self, flux=None, flux_x=None, flux_y=None, scheme='upwind'):
         """
-        Escape-hatch: add a custom flux -dF/dx with explicit scheme.
-        1D only for now; 2D custom fluxes require flux_x and flux_y.
+        Add a conservation-law flux divergence  -dF/dx  (1D) or
+        -dF_x/dx - dF_y/dy  (2D).
 
-        flux   : callable(x, **fields) -> ndarray
-        scheme : 'upwind' | 'central'
+        This is the conservative form: use this when your equation is
+            du/dt + dF(u)/dx = 0
+        The upwind direction is determined by the local wave speed
+            a(u) = dF/du
+        estimated via finite difference, so sign(a) — not sign(F) — governs
+        the stencil direction.  For the central scheme no wave speed is needed.
+
+        1D : add_flux(flux=F)
+             Adds  -dF(u)/dx
+
+        2D : add_flux(flux_x=F, flux_y=G)
+             Adds  -dF(u)/dx - dG(u)/dy
+             Either flux_x or flux_y may be omitted.
+
+        Parameters
+        ----------
+        flux   : callable(phi) -> ndarray   [1D]
+        flux_x : callable(phi) -> ndarray   [2D, x-direction]
+        flux_y : callable(phi) -> ndarray   [2D, y-direction]
+        scheme : 'upwind' (default) | 'central'
+
+        Notes
+        -----
+        For upwind scheme, each flux callable must accept the field array
+        and return an array of the same shape.  The wave speed is inferred
+        automatically as dF/dphi via forward finite difference (eps=1e-6*max|phi|).
         """
         if scheme not in ('upwind', 'central'):
             raise ValueError(
                 f"scheme must be 'upwind' or 'central'; got '{scheme}'"
             )
-        self._fluxes.append({'flux': _to_callable(flux), 'scheme': scheme})
+        if self.is_2d:
+            if flux_x is None and flux_y is None:
+                raise ValueError(
+                    "In 2D use add_flux(flux_x=..., flux_y=...)"
+                )
+            self._fluxes.append({
+                'flux_x': _to_callable(flux_x) if flux_x is not None else None,
+                'flux_y': _to_callable(flux_y) if flux_y is not None else None,
+                'scheme': scheme,
+            })
+        else:
+            if flux is None:
+                raise ValueError("In 1D use add_flux(flux=F)")
+            self._fluxes.append({'flux': _to_callable(flux), 'scheme': scheme})
+        return self
+
+    def add_term(self, fn):
+        """
+        Add a generic term to this equation's RHS using differential operators.
+
+        fn : callable whose arguments are any combination of:
+               - field names   (e.g. u, v, p, T)
+               - Dx, Dy        central-difference d/dx, d/dy operators
+               - Div_x, Div_y  central flux-divergence operators
+
+             fn must return an ndarray of shape (nx,) [1D] or (nx,ny) [2D]
+             representing the contribution to dfield/dt.
+
+        The operators are BC-aware: ghost cells are padded according to
+        each field's boundary conditions, so e.g. Dx(p) at a Dirichlet
+        wall uses the correct ghost value, not a periodic wrap.
+
+        Operator signatures
+        -------------------
+        Dx(phi)        d(phi)/dx  — central differences
+        Dy(phi)        d(phi)/dy  — central differences
+        Div_x(c, phi)  -d(c*phi)/dx  — 2nd-order central
+        Div_y(c, phi)  -d(c*phi)/dy  — 2nd-order central
+
+        phi and c may each be:
+          - an ndarray of the right shape
+          - a scalar  (broadcast to the grid)
+          - a string field name  (looked up at eval time)
+
+        Examples
+        --------
+        Navier-Stokes momentum (u-equation)::
+
+            def u_rhs(u, v, p, Dx, Dy, Div_x, Div_y):
+                return (- Div_x(u, u) - Div_y(v, u)
+                        - (1/rho) * Dx(p)
+                        + nu * (Dx(Dx(u)) + Dy(Dy(u))))
+            eq_u.add_term(u_rhs)
+
+        Pressure (artificial compressibility)::
+
+            eq_p.add_term(lambda u, v, Dx, Dy: -beta * (Dx(u) + Dy(v)))
+
+        Mixing with existing API (nonlinear diffusion + cross-field gradient)::
+
+            eq_T.add_diffusion(diffusivity=lambda x, y, T: 1 + T**2)
+            eq_T.add_term(lambda T, S, Dx: -alpha * Dx(S))
+        """
+        if not callable(fn):
+            raise TypeError("add_term expects a callable.")
+        self._generic_terms.append(fn)
         return self
 
     # ------------------------------------------------------------------
@@ -591,8 +892,13 @@ class PDE:
         refs = set()
         for term in self._advection:
             for key in ('velocity', 'velocity_x', 'velocity_y'):
-                if term.get(key) is not None:
-                    refs |= _callable_field_refs(term[key])
+                fn = term.get(key)
+                if fn is None:
+                    continue
+                if hasattr(fn, '_field_ref_name'):
+                    refs.add(fn._field_ref_name)
+                else:
+                    refs |= _callable_field_refs(fn)
         for term in self._diffusion:
             for key in ('diffusivity', 'diffusivity_x', 'diffusivity_y'):
                 if term.get(key) is not None:
@@ -600,7 +906,11 @@ class PDE:
         for term in self._sources:
             refs |= _callable_field_refs(term['expr'])
         for term in self._fluxes:
-            refs |= _callable_field_refs(term['flux'])
+            for key in ('flux', 'flux_x', 'flux_y'):
+                if term.get(key) is not None:
+                    refs |= _callable_field_refs(term[key])
+        for fn in self._generic_terms:
+            refs |= _callable_field_refs(fn)
         return refs
 
     # ------------------------------------------------------------------
@@ -850,22 +1160,23 @@ class PDESystem:
             coords = eq._coords()
             rhs    = rhs_nd[eq.field]
 
-            # --- Advection ---
-            if eq.is_2d:
-                bct = eq._bc_types_2d()
+            # --- Advection: convective form  -c * dphi/d{x,y}, upwind on sign(c) ---
+            bct = eq._bc_types_2d() if eq.is_2d else {}
             for term in eq._advection:
                 if eq.is_2d:
                     if term['velocity_x'] is not None:
-                        cx   = _call(term['velocity_x'], coords, fields_nd)
-                        rhs += _upwind_2d(phi, cx, eq.dx, axis=0,
-                                          bc_lo=bct['x-'], bc_hi=bct['x+'])
+                        cx  = _call(term['velocity_x'], coords, fields_nd)
+                        rhs -= _convect_2d(phi, cx, eq.dx, axis=0,
+                                           bc_lo=bct['x-'], bc_hi=bct['x+'])
                     if term['velocity_y'] is not None:
-                        cy   = _call(term['velocity_y'], coords, fields_nd)
-                        rhs += _upwind_2d(phi, cy, eq.dy, axis=1,
-                                          bc_lo=bct['y-'], bc_hi=bct['y+'])
+                        cy  = _call(term['velocity_y'], coords, fields_nd)
+                        rhs -= _convect_2d(phi, cy, eq.dy, axis=1,
+                                           bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
-                    c    = _call(term['velocity'], coords, fields_nd)
-                    rhs += _upwind_1d(phi, c, eq.dx)
+                    c     = _call(term['velocity'], coords, fields_nd)
+                    bc_lo = 'periodic' if any(bc.kind=='periodic' for bc in eq._bcs) else 'none'
+                    bc_hi = bc_lo
+                    rhs  -= _convect_1d(phi, c, eq.dx, bc_lo, bc_hi)
 
             # --- Diffusion ---
             for term in eq._diffusion:
@@ -886,13 +1197,52 @@ class PDESystem:
             for term in eq._sources:
                 rhs += _call(term['expr'], coords, fields_nd)
 
-            # --- Custom fluxes (1D only for now) ---
+            # --- Conservation-law fluxes: -dF/dx [-dG/dy] ---
+            # flux callables take the field array directly: F(phi) -> ndarray
             for term in eq._fluxes:
-                F = _call(term['flux'], coords, fields_nd)
-                if term['scheme'] == 'central':
-                    rhs -= np.gradient(F, eq.dx)
+                if eq.is_2d:
+                    if term.get('flux_x') is not None:
+                        fn = term['flux_x']
+                        F  = fn(phi)
+                        if term['scheme'] == 'central':
+                            rhs -= _central_flux_2d(F, eq.dx, axis=0,
+                                                    bc_lo=bct['x-'], bc_hi=bct['x+'])
+                        else:
+                            a = _wave_speed(fn, phi)
+                            rhs -= _upwind_flux_2d(F, a, eq.dx, axis=0,
+                                                   bc_lo=bct['x-'], bc_hi=bct['x+'])
+                    if term.get('flux_y') is not None:
+                        fn = term['flux_y']
+                        F  = fn(phi)
+                        if term['scheme'] == 'central':
+                            rhs -= _central_flux_2d(F, eq.dy, axis=1,
+                                                    bc_lo=bct['y-'], bc_hi=bct['y+'])
+                        else:
+                            a = _wave_speed(fn, phi)
+                            rhs -= _upwind_flux_2d(F, a, eq.dy, axis=1,
+                                                   bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
-                    rhs += _upwind_flux_1d(F, eq.dx)
+                    fn = term['flux']
+                    F  = fn(phi)
+                    if term['scheme'] == 'central':
+                        rhs -= _central_flux_1d(F, eq.dx)
+                    else:
+                        a = _wave_speed(fn, phi)
+                        rhs -= _upwind_flux_1d(F, a, eq.dx)
+
+            # --- Generic add_term callables ---
+            if eq._generic_terms:
+                ops = _build_operators(eq, fields_nd, bct if eq.is_2d else {})
+                for fn in eq._generic_terms:
+                    sig    = inspect.signature(fn)
+                    params = sig.parameters
+                    kwargs = {}
+                    for name in params:
+                        if name in fields_nd:
+                            kwargs[name] = fields_nd[name]
+                        elif name in ops:
+                            kwargs[name] = ops[name]
+                    rhs += fn(**kwargs)
 
             # --- Domain-edge boundary conditions ---
             rhs = _apply_bcs(eq, rhs, phi, t)
@@ -916,9 +1266,10 @@ class PDESystem:
                         # Spatial callable value(x[,y]): freeze at IC value
                         rhs[ibc.mask] = 0.0
                 elif ibc.kind == 'neumann':
-                    # Zero-flux / insulating: simply freeze interior cells.
-                    # The stencil at interface cells already sees the fixed
-                    # interior values (set in IC), giving approximate no-flux.
+                    # Approximate zero-flux: freeze interior cells.
+                    # Interface fluid cells still see the frozen solid value
+                    # in their stencil — a first-order approximation sufficient
+                    # for pressure obstacles and coarse insulation.
                     rhs[ibc.mask] = 0.0
 
             rhs_nd[eq.field] = rhs
@@ -973,6 +1324,36 @@ def _ghost_pad(arr, axis, bc_lo, bc_hi):
     return np.concatenate([lo, arr, hi], axis=axis)
 
 
+def _ghost_pad_dirichlet(arr, axis, bc_lo, bc_hi, val_lo=0.0, val_hi=0.0):
+    """
+    Ghost-cell padding with proper Dirichlet ghost values.
+
+    For Dirichlet boundaries, the ghost is set so that the average of
+    ghost and boundary equals the prescribed value:
+        ghost = 2*value - boundary_node
+    This gives correct second-derivative stencils at Dirichlet walls.
+
+    Used by Dxx/Dyy operators in add_term callables.
+    """
+    if bc_lo == 'periodic':
+        lo = np.take(arr, [-1], axis=axis)
+    elif bc_lo == 'dirichlet':
+        bnd = np.take(arr, [0], axis=axis)
+        lo  = 2.0 * val_lo - bnd
+    else:
+        lo = np.take(arr, [0], axis=axis)   # zero-gradient (Neumann/none)
+
+    if bc_hi == 'periodic':
+        hi = np.take(arr, [0], axis=axis)
+    elif bc_hi == 'dirichlet':
+        bnd = np.take(arr, [-1], axis=axis)
+        hi  = 2.0 * val_hi - bnd
+    else:
+        hi = np.take(arr, [-1], axis=axis)
+
+    return np.concatenate([lo, arr, hi], axis=axis)
+
+
 def _upwind_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
     """First-order upwind -d(c*phi)/d{axis} in 2D with ghost-cell padding."""
     n       = phi.shape[axis]
@@ -996,15 +1377,84 @@ def _upwind_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
     return -dFd
 
 
-def _upwind_flux_1d(F, dx):
-    """Upwind differencing for a precomputed flux F (1D)."""
-    F_l  = np.roll(F, 1)
-    dFdx = np.where(
-        F >= 0,
-        (F - F_l) / dx,
-        (np.roll(F, -1) - F) / dx,
-    )
-    return -dFdx
+def _wave_speed(flux_fn, phi, eps=1e-6):
+    """
+    Estimate local wave speed a(phi) = dF/dphi via forward finite difference.
+    eps is scaled by max|phi| to handle fields of varying magnitude.
+    """
+    scale = np.max(np.abs(phi))
+    h     = eps * scale if scale > 0 else eps
+    return (flux_fn(phi + h) - flux_fn(phi)) / h
+
+
+def _convect_1d(phi, c, dx, bc_lo='none', bc_hi='none'):
+    """
+    Convective form  c * dphi/dx  with first-order upwinding on sign(c).
+    Returns the term as-is (caller negates: rhs -= _convect_1d(...)).
+    """
+    p        = _ghost_pad(phi, 0, bc_lo, bc_hi)
+    dphi_bwd = (phi - p[:-2]) / dx   # backward difference  (phi[i] - phi[i-1])
+    dphi_fwd = (p[2:] - phi)  / dx   # forward difference   (phi[i+1] - phi[i])
+    return c * np.where(c >= 0, dphi_bwd, dphi_fwd)
+
+
+def _convect_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
+    """
+    Convective form  c * dphi/d{axis}  with first-order upwinding on sign(c).
+    """
+    n       = phi.shape[axis]
+    phi_ext = _ghost_pad(phi, axis, bc_lo, bc_hi)
+    phi_c   = np.take(phi_ext, range(1, n+1), axis=axis)
+    phi_r   = np.take(phi_ext, range(2, n+2), axis=axis)
+    phi_l   = np.take(phi_ext, range(0, n),   axis=axis)
+    dphi_bwd = (phi_c - phi_l) / d
+    dphi_fwd = (phi_r - phi_c) / d
+    return c * np.where(c >= 0, dphi_bwd, dphi_fwd)
+
+
+def _upwind_flux_1d(F, a, dx):
+    """
+    Upwind flux differencing  dF/dx  in 1D.
+    Upwind direction determined by wave speed a = dF/dphi (not sign(F)).
+    Uses simple donor-cell: F_{i+1/2} = F_i if a>=0 else F_{i+1}.
+    """
+    F_l  = np.roll(F,  1)   # F[i-1]
+    F_r  = np.roll(F, -1)   # F[i+1]
+    # face flux at i+1/2: upwind on a
+    F_iph = np.where(a >= 0, F,   F_r)   # right face
+    F_imh = np.where(a >= 0, F_l, F  )   # left face
+    return (F_iph - F_imh) / dx
+
+
+def _upwind_flux_2d(F, a, d, axis, bc_lo='none', bc_hi='none'):
+    """
+    Upwind flux differencing  dF/d{axis}  in 2D.
+    Upwind direction determined by wave speed a = dF/dphi.
+    """
+    n     = F.shape[axis]
+    F_ext = _ghost_pad(F, axis, bc_lo, bc_hi)
+    a_ext = _ghost_pad(a, axis, bc_lo, bc_hi)
+    F_c   = np.take(F_ext, range(1, n+1), axis=axis)
+    F_r   = np.take(F_ext, range(2, n+2), axis=axis)
+    F_l   = np.take(F_ext, range(0, n),   axis=axis)
+    a_c   = np.take(a_ext, range(1, n+1), axis=axis)
+    F_iph = np.where(a_c >= 0, F_c, F_r)   # right face
+    F_imh = np.where(a_c >= 0, F_l, F_c)   # left face
+    return (F_iph - F_imh) / d
+
+
+def _central_flux_1d(F, dx):
+    """Central differencing of flux  dF/dx  in 1D."""
+    return (np.roll(F, -1) - np.roll(F, 1)) / (2.0 * dx)
+
+
+def _central_flux_2d(F, d, axis, bc_lo='none', bc_hi='none'):
+    """Central differencing of flux  dF/d{axis}  in 2D."""
+    n     = F.shape[axis]
+    F_ext = _ghost_pad(F, axis, bc_lo, bc_hi)
+    F_r   = np.take(F_ext, range(2, n+2), axis=axis)
+    F_l   = np.take(F_ext, range(0, n),   axis=axis)
+    return (F_r - F_l) / (2.0 * d)
 
 
 def _diffuse_1d(phi, D, dx):
