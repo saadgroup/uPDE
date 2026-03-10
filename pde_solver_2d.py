@@ -168,6 +168,47 @@ class _BC:
 
 
 # ---------------------------------------------------------------------------
+# Interior obstacle descriptor
+# ---------------------------------------------------------------------------
+
+class _InteriorBC:
+    """
+    Descriptor for an interior region (obstacle / inclusion).
+
+    kind    : 'dirichlet' — fix the field value inside the mask
+              'neumann'   — zero-flux approximation (inactive cells:
+                            RHS zeroed, neighbours see the fixed value
+                            at their stencil interface)
+    mask    : bool ndarray matching the field shape — True = interior/solid
+    value   : scalar | callable(t) | callable(x[,y])  (Dirichlet only)
+    """
+
+    def __init__(self, kind, mask, value=None):
+        if kind not in ('dirichlet', 'neumann'):
+            raise ValueError(
+                f"Interior BC kind must be 'dirichlet' or 'neumann'; got '{kind}'"
+            )
+        if kind == 'dirichlet' and value is None:
+            raise ValueError("Interior Dirichlet BC requires a value.")
+        self.kind  = kind
+        self.mask  = np.asarray(mask, dtype=bool)
+        self.value = value
+
+    def get_value(self, t):
+        """Evaluate prescribed value at time t (scalar or callable(t))."""
+        if self.value is None:
+            return 0.0
+        if callable(self.value):
+            try:
+                return float(self.value(t))
+            except TypeError:
+                # value is a spatial callable — cannot evaluate at t alone;
+                # return None to signal spatial evaluation needed
+                return None
+        return float(self.value)
+
+
+# ---------------------------------------------------------------------------
 # Solution container
 # ---------------------------------------------------------------------------
 
@@ -272,12 +313,13 @@ class PDE:
         self.x = self.X
         self.n = self.nx   # used by 1D BCs / legacy code
 
-        self._advection = []
-        self._diffusion = []
-        self._sources   = []
-        self._fluxes    = []
-        self._bcs       = []
-        self._ic        = None
+        self._advection    = []
+        self._diffusion    = []
+        self._sources      = []
+        self._fluxes       = []
+        self._bcs          = []
+        self._interior_bcs = []   # list of _InteriorBC
+        self._ic           = None
 
     # ------------------------------------------------------------------
     # Public API: add terms
@@ -436,6 +478,72 @@ class PDE:
             )
 
         self._bcs.append(_BC(kind, bc_mask, value, normal=normal))
+        return self
+
+    def set_interior_bc(self, mask, kind='dirichlet', value=None):
+        """
+        Mark an interior region as a solid obstacle or inclusion.
+
+        This implements the inactive-cell approach: the RHS at all masked
+        points is forced to zero (or dvalue/dt for time-varying Dirichlet)
+        at every time step, so the integrator never evolves those cells.
+        Neighbouring active cells see the obstacle's fixed values through
+        the stencil, which imposes an approximate interface condition.
+
+        Parameters
+        ----------
+        mask  : bool ndarray of shape (nx,) [1D] or (nx, ny) [2D]
+                True where the obstacle/inclusion occupies the grid.
+        kind  : 'dirichlet' (default) | 'neumann'
+                'dirichlet' — fix the field to *value* inside the mask.
+                              Use for no-slip walls (value=0), heated
+                              cylinders (value=T_wall), etc.
+                'neumann'   — zero-flux approximation.  The interior cells
+                              are frozen at their IC values and the stencil
+                              at interface cells naturally sees those fixed
+                              values, giving an approximate no-flux wall.
+                              value= is ignored.
+        value : scalar | callable(t) | None
+                Prescribed field value inside the obstacle (Dirichlet only).
+                callable(t) is evaluated at each time step, enabling
+                time-varying interior temperatures / concentrations.
+
+        Notes
+        -----
+        * Interior BCs are applied *after* all stencil terms and after
+          domain-edge BCs, so they always win at masked points.
+        * The IC at masked points is automatically snapped to *value* at
+          t=t0 when PDESystem.solve() is called, ensuring consistency.
+        * For Neumann ('no-flux') obstacles, initialise the field inside
+          the mask to the ambient value you want the wall to hold; uPDE
+          will keep it frozen there.
+        * Multiple calls accumulate — you can place several obstacles of
+          different kinds on the same field.
+
+        Examples
+        --------
+        Heated cylinder (Dirichlet, T_wall = 2.0)::
+
+            mask = (X - cx)**2 + (Y - cy)**2 < r**2
+            eq.set_interior_bc(mask, kind='dirichlet', value=2.0)
+
+        Insulating obstacle (zero-flux, frozen at ambient T=0)::
+
+            eq.set_interior_bc(mask, kind='neumann')
+            # initialise IC to 0 everywhere, including inside mask
+
+        Pulsating heat source::
+
+            eq.set_interior_bc(mask, kind='dirichlet',
+                               value=lambda t: 1.0 + 0.5*np.sin(2*np.pi*t))
+        """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != ((self.nx, self.ny) if self.is_2d else (self.nx,)):
+            raise ValueError(
+                f"Interior BC mask shape {mask.shape} does not match field "
+                f"shape {(self.nx, self.ny) if self.is_2d else (self.nx,)}."
+            )
+        self._interior_bcs.append(_InteriorBC(kind, mask, value))
         return self
 
     # ------------------------------------------------------------------
@@ -703,6 +811,12 @@ class PDESystem:
                 for bc in eq._bcs:
                     if bc.kind == 'dirichlet':
                         ic_2d[bc.mask] = bc.get_value(t0)
+            # Snap interior Dirichlet BCs (obstacles / inclusions)
+            for ibc in eq._interior_bcs:
+                if ibc.kind == 'dirichlet':
+                    v = ibc.get_value(t0)
+                    if v is not None:
+                        ic_2d[ibc.mask] = v
             ICs[eq.field] = ic_2d.ravel()
 
         y0  = np.concatenate([ICs[f] for f in self.fields])
@@ -780,8 +894,34 @@ class PDESystem:
                 else:
                     rhs += _upwind_flux_1d(F, eq.dx)
 
-            # --- Boundary conditions ---
-            rhs_nd[eq.field] = _apply_bcs(eq, rhs, phi, t)
+            # --- Domain-edge boundary conditions ---
+            rhs = _apply_bcs(eq, rhs, phi, t)
+
+            # --- Interior obstacle / inclusion BCs ---
+            # Applied last so they always override stencil values at
+            # masked (solid) points, regardless of what the stencil computed.
+            for ibc in eq._interior_bcs:
+                if ibc.kind == 'dirichlet':
+                    v = ibc.get_value(t)
+                    if v is not None:
+                        # Constant or time-varying scalar value:
+                        # set dφ/dt = 0 (constant) or dvalue/dt (time-varying)
+                        if callable(ibc.value):
+                            dt_fd = 1e-8
+                            dvdt  = (ibc.value(t + dt_fd) - ibc.value(t)) / dt_fd
+                            rhs[ibc.mask] = dvdt
+                        else:
+                            rhs[ibc.mask] = 0.0
+                    else:
+                        # Spatial callable value(x[,y]): freeze at IC value
+                        rhs[ibc.mask] = 0.0
+                elif ibc.kind == 'neumann':
+                    # Zero-flux / insulating: simply freeze interior cells.
+                    # The stencil at interface cells already sees the fixed
+                    # interior values (set in IC), giving approximate no-flux.
+                    rhs[ibc.mask] = 0.0
+
+            rhs_nd[eq.field] = rhs
 
         return np.concatenate([rhs_nd[eq.field].ravel() for eq in self.equations])
 
