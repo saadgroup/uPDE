@@ -915,6 +915,42 @@ class PDE:
 
     # ------------------------------------------------------------------
     # Internals
+    def solve(self, t_span, **kwargs):
+        """
+        Solve this equation directly without constructing a PDESystem manually.
+
+        Raises ValueError if the equation references external fields — in that
+        case it is coupled and must be solved via PDESystem explicitly.
+
+        Parameters
+        ----------
+        t_span : (t0, tf)
+        **kwargs : forwarded to PDESystem.solve() / solve_ivp
+                   (method, t_eval, rtol, atol, dense_output, ...)
+
+        Returns
+        -------
+        PDESolution
+
+        Example
+        -------
+        eq = HeatEquation('T', x=x, diffusivity=0.01)
+        eq.set_bc(side='left',  kind='dirichlet', value=1.0)
+        eq.set_bc(side='right', kind='dirichlet', value=0.0)
+        eq.set_ic(0.0)
+        sol = eq.solve(t_span=(0, 1), method='BDF')
+        sol.T   # shape (nx, nt)
+        """
+        # External refs are any field names other than this equation's own field
+        external_refs = self.field_refs() - {self.field}
+        if external_refs:
+            raise ValueError(
+                f"PDE('{self.field}') references external field(s) {sorted(external_refs)} "
+                f"and cannot be solved independently. "
+                f"Use PDESystem([...]).solve() to solve coupled equations together."
+            )
+        return PDESystem([self]).solve(t_span, **kwargs)
+
     # ------------------------------------------------------------------
 
     def _side_to_mask(self, side):
