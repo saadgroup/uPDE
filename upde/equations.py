@@ -487,13 +487,14 @@ def GrayScott(u_name, v_name, x, y=None,
 # ---------------------------------------------------------------------------
 
 def NavierStokes2D(u_name, v_name, p_name, x, y,
-                   nu=0.01, rho=1.0, beta=0.5):
+                   nu=0.01, rho=1.0, beta=0.5,
+                   pressure_stabilisation=None):
     """
     2D incompressible Navier-Stokes via artificial compressibility:
 
         ∂u/∂t = -u∂u/∂x - v∂u/∂y - (1/ρ)∂p/∂x + ν∇²u
         ∂v/∂t = -u∂v/∂x - v∂v/∂y - (1/ρ)∂p/∂y + ν∇²v
-        ∂p/∂t = -β(∂u/∂x + ∂v/∂y)
+        ∂p/∂t = -β(∂u/∂x + ∂v/∂y) + ε∇²p
 
     The pressure evolution equation drives divergence toward zero.
     The residual divergence is O(1/β) — this method is not exactly
@@ -512,7 +513,12 @@ def NavierStokes2D(u_name, v_name, p_name, x, y,
     y      : array -- 1D y-coordinate array
     nu     : float -- kinematic viscosity  (default 0.01)
     rho    : float -- density              (default 1.0)
-    beta   : float -- artificial compressibility parameter (default 0.5)
+    beta                   : float -- artificial compressibility parameter (default 0.5)
+    pressure_stabilisation : float or None -- coefficient ε for the pressure
+                             Laplacian term ε∇²p added to the pressure equation
+                             to suppress checkerboard oscillations on collocated
+                             grids. Default (None) sets ε = 0.5*dx² automatically.
+                             Set to 0.0 to disable, or provide a custom value.
 
     Returns
     -------
@@ -579,10 +585,16 @@ def NavierStokes2D(u_name, v_name, p_name, x, y,
             return -adv - (1/rho) * Dy(p) + nu * (Dxx(v) + Dyy(v))
         return v_rhs
 
-    def make_p_rhs(u_name, v_name, beta):
-        def p_rhs(Dx, Dy, **fields):
-            u = fields[u_name]; v = fields[v_name]
-            return -beta * (Dx(u) + Dy(v))
+    def make_p_rhs(u_name, v_name, beta, eps):
+        if eps == 0.0 or eps is None:
+            def p_rhs(Dx, Dy, **fields):
+                u = fields[u_name]; v = fields[v_name]
+                return -beta * (Dx(u) + Dy(v))
+        else:
+            def p_rhs(Dx, Dy, Dxx, Dyy, **fields):
+                u = fields[u_name]; v = fields[v_name]
+                p = fields[p_name]
+                return -beta * (Dx(u) + Dy(v)) + eps * (Dxx(p) + Dyy(p))
         return p_rhs
 
     eq_u = PDE(u_name, x=x, y=y)
@@ -592,6 +604,9 @@ def NavierStokes2D(u_name, v_name, p_name, x, y,
     eq_v.add_term(make_v_rhs(u_name, v_name, p_name, nu, rho))
 
     eq_p = PDE(p_name, x=x, y=y)
-    eq_p.add_term(make_p_rhs(u_name, v_name, beta))
+    dx = x[1] - x[0]
+    if pressure_stabilisation is None:
+        pressure_stabilisation = 0.5 * dx**2
+    eq_p.add_term(make_p_rhs(u_name, v_name, beta, pressure_stabilisation))
 
     return NamedPDESystem([eq_u, eq_v, eq_p], [u_name, v_name, p_name])
