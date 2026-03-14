@@ -112,15 +112,17 @@ def _to_callable(val):
     )
 
 
-def _call(fn, coords, fields):
+def _call(fn, coords, fields, t=0.0):
     """
-    Call fn with spatial coordinates and field arrays.
+    Call fn with spatial coordinates, field arrays, and optionally time.
 
     coords : tuple — (x,) in 1D, (x, y) in 2D  (meshgrid arrays)
     fields : dict  — {field_name: array, ...}
+    t      : float — current solver time (injected only if fn declares 't')
 
     Forwards only the kwargs the callable declares; **kwargs gets everything.
-    'x' and 'y' are positional, fields are keyword.
+    'x' and 'y' are positional, fields and 't' are keyword.
+    Backward compatible — callables that don't declare 't' never receive it.
     """
     sig    = inspect.signature(fn)
     params = sig.parameters
@@ -128,8 +130,10 @@ def _call(fn, coords, fields):
         p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
     if has_var_kw:
-        return fn(*coords, **fields)
+        return fn(*coords, t=t, **fields)
     accepted = {k: v for k, v in fields.items() if k in params}
+    if 't' in params:
+        accepted['t'] = t
     return fn(*coords, **accepted)
 
 
@@ -491,6 +495,11 @@ class PDE:
         if not isinstance(field, str):
             raise TypeError(
                 "PDE() takes a single field name string as its first argument."
+            )
+        if field == 't':
+            raise ValueError(
+                "Field name 't' is reserved for the solver time variable. "
+                "Choose a different name (e.g. 'T', 'tau', 'temp')."
             )
         self.field = field
         self.x1d   = np.asarray(x, dtype=float)
@@ -1201,15 +1210,15 @@ class PDESystem:
             for term in eq._advection:
                 if eq.is_2d:
                     if term['velocity_x'] is not None:
-                        cx  = _call(term['velocity_x'], coords, fields_nd)
+                        cx  = _call(term['velocity_x'], coords, fields_nd, t=t)
                         rhs -= _convect_2d(phi, cx, eq.dx, axis=0,
                                            bc_lo=bct['x-'], bc_hi=bct['x+'])
                     if term['velocity_y'] is not None:
-                        cy  = _call(term['velocity_y'], coords, fields_nd)
+                        cy  = _call(term['velocity_y'], coords, fields_nd, t=t)
                         rhs -= _convect_2d(phi, cy, eq.dy, axis=1,
                                            bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
-                    c     = _call(term['velocity'], coords, fields_nd)
+                    c     = _call(term['velocity'], coords, fields_nd, t=t)
                     bc_lo = 'periodic' if any(bc.kind=='periodic' for bc in eq._bcs) else 'none'
                     bc_hi = bc_lo
                     rhs  -= _convect_1d(phi, c, eq.dx, bc_lo, bc_hi)
@@ -1218,20 +1227,20 @@ class PDESystem:
             for term in eq._diffusion:
                 if eq.is_2d:
                     if term['diffusivity_x'] is not None:
-                        Dx   = _call(term['diffusivity_x'], coords, fields_nd)
+                        Dx   = _call(term['diffusivity_x'], coords, fields_nd, t=t)
                         rhs += _diffuse_2d(phi, Dx, eq.dx, axis=0,
                                            bc_lo=bct['x-'], bc_hi=bct['x+'])
                     if term['diffusivity_y'] is not None:
-                        Dy   = _call(term['diffusivity_y'], coords, fields_nd)
+                        Dy   = _call(term['diffusivity_y'], coords, fields_nd, t=t)
                         rhs += _diffuse_2d(phi, Dy, eq.dy, axis=1,
                                            bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
-                    D    = _call(term['diffusivity'], coords, fields_nd)
+                    D    = _call(term['diffusivity'], coords, fields_nd, t=t)
                     rhs += _diffuse_1d(phi, D, eq.dx)
 
             # --- Sources ---
             for term in eq._sources:
-                rhs += _call(term['expr'], coords, fields_nd)
+                rhs += _call(term['expr'], coords, fields_nd, t=t)
 
             # --- Conservation-law fluxes: -dF/dx [-dG/dy] ---
             # flux callables take the field array directly: F(phi) -> ndarray
