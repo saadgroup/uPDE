@@ -10,7 +10,7 @@ integrators without writing a single line of time-stepping code.
 **Features:**
 - 1D and 2D problems on uniform Cartesian grids
 - Coupled multi-field systems
-- Scalar, array, and callable (nonlinear / field-dependent) coefficients
+- Scalar, array, and callable (nonlinear, field-dependent, or time-dependent) coefficients
 - Dirichlet, Neumann, and periodic boundary conditions
 - Interior boundary conditions for obstacles and inclusions
 - Pre-built equation prototypes for common PDE families
@@ -25,6 +25,7 @@ integrators without writing a single line of time-stepping code.
 - [Core Concepts](#core-concepts)
 - [User Guide](#user-guide)
   - [Coefficients and Callables](#coefficients-and-callables)
+  - [Time-Dependent Callables](#time-dependent-callables)
   - [Boundary Conditions](#boundary-conditions)
   - [Initial Conditions](#initial-conditions)
   - [Coupled Systems](#coupled-systems)
@@ -98,8 +99,7 @@ sol = PDESystem([eq]).solve(t_span=(0, 1), method='RK45')
 Or use a pre-built equation prototype and call `solve` directly on it:
 
 ```python
-from upde import PDESystem
-from equations import HeatEquation
+from upde import PDESystem, HeatEquation
 
 eq = HeatEquation('T', x=x, diffusivity=0.05)
 eq.set_bc(side='left',  kind='dirichlet', value=1.0)
@@ -150,16 +150,34 @@ sol.raw         # raw scipy OdeResult
 
 Every coefficient in uPDE — diffusivity, velocity, source — accepts three forms:
 
-| Form | Example | When called |
-|------|---------|-------------|
-| scalar | `0.05` | Broadcast to the full grid |
-| ndarray | `D_arr` | Used as-is; must match the field shape |
-| callable 1D | `lambda x, T: 1 + T**2` | `f(x, **fields)` at every time step |
-| callable 2D | `lambda x, y, T: x * T` | `f(x, y, **fields)`; x, y are meshgrid arrays |
-| string | `'u'` | Field name — resolved from the live coupled state |
+| Form | Example |
+|------|---------|
+| scalar | `0.05` |
+| ndarray | `D_arr` — used as-is; must match the field shape |
+| callable | `lambda x, T: 1 + T**2` — called at every RHS evaluation |
+| string | `'u'` — resolved from the live coupled state (field coupling) |
 
-uPDE uses `inspect.signature` to forward only the arguments a callable actually declares.
-Extra parameters go in via closures:
+**Callable signature convention**
+
+Callables always receive coordinates first, then keyword arguments. Declare only
+what you need — uPDE uses `inspect.signature` to inject only the parameters your
+function actually declares:
+
+| Dimension | Signature | Notes |
+|-----------|-----------|-------|
+| 1D | `f(x)` | coordinates only |
+| 1D | `f(x, t)` | coordinates + current time |
+| 1D | `f(x, fieldA)` | coordinates + one field |
+| 1D | `f(x, t, fieldA)` | coordinates + time + one field |
+| 1D | `f(x, t, **fields)` | coordinates + time + all fields |
+| 2D | `f(x, y)` | coordinates only |
+| 2D | `f(x, y, t)` | coordinates + time |
+| 2D | `f(x, y, fieldA)` | coordinates + one field |
+| 2D | `f(x, y, t, fieldA)` | coordinates + time + one field |
+| 2D | `f(x, y, t, **fields)` | coordinates + time + all fields |
+
+The ordering rule is: **coordinates → t → field names**. `t` is a reserved name
+and cannot be used as a field name. Fixed parameters go in via closures:
 
 ```python
 k1 = 10.0
@@ -276,6 +294,53 @@ eq.add_advection(velocity_x=1.0, velocity_y=0.5)        # 2D advection
 
 ---
 
+### Time-Dependent Callables
+
+Any coefficient — velocity, diffusivity, or source — can depend on the current
+solver time `t` by declaring it as a parameter after the spatial coordinates.
+No other changes to your code are required.
+
+```python
+import numpy as np
+from upde import PDE
+
+x = np.linspace(0, 1, 128)
+
+eq = PDE('C', x=x)
+
+# Velocity that ramps up linearly over the first 10 seconds
+eq.add_advection(velocity=lambda x, t: min(t / 10.0, 1.0) * np.ones_like(x))
+
+# Source that shuts off after 6 hours
+eq.add_source(expr=lambda x, t, C: (1.0 if t < 6*3600 else 0.0) - 0.01 * C)
+
+# Diffusivity from a time-interpolated dataset (e.g. ERA5 reanalysis)
+import scipy.interpolate as interp
+D_interp = interp.interp1d(time_points, D_values)
+eq.add_diffusion(diffusivity=lambda x, t: D_interp(t) * np.ones_like(x))
+
+eq.set_bc(kind='periodic')
+eq.set_ic(ic)
+sol = eq.solve(t_span=(0, 86400), method='RK45')
+```
+
+For 2D, `t` comes after both spatial coordinates:
+
+```python
+eq2d = PDE('C', x=x, y=y)
+
+# Time-varying 2D wind field
+eq2d.add_advection(
+    velocity_x=lambda x, y, t: interp_U(t) * np.ones_like(x),
+    velocity_y=lambda x, y, t: interp_V(t) * np.ones_like(x),
+)
+```
+
+> **Note:** `t` is a reserved name. `PDE('t', ...)` raises a `ValueError`.
+> Use `'T'`, `'tau'`, or any other name for a temperature-like field.
+
+---
+
 ### Interior Boundary Conditions
 
 `set_interior_bc` enforces a condition on an arbitrary boolean mask at every RHS
@@ -325,9 +390,9 @@ All factories return plain `PDE` objects (or `NamedPDESystem` for multi-field sy
 so the full API remains available after construction.
 
 ```python
-from equations import HeatEquation, AdvectionDiffusion, Burgers, \
-                      ConservationLaw, ReactionDiffusion, \
-                      WaveEquation, GrayScott, NavierStokes2D
+from upde import (HeatEquation, AdvectionDiffusion, Burgers,
+                  ConservationLaw, ReactionDiffusion,
+                  WaveEquation, GrayScott, NavierStokes2D)
 ```
 
 **1D vs 2D:** all single-field factories support both 1D and 2D — pass `y` to activate
@@ -783,4 +848,5 @@ conditions before each stencil application.
 
 **Field not found in solution**
 - Check the field name string passed to `PDE(field, ...)` matches what you access on `sol`
-- Field names are case-sensitive: `'T'` and `'t'` are different fields
+- Field names are case-sensitive: `'T'` and `'t'` are different
+- `'t'` is reserved for the solver time — `PDE('t', ...)` raises `ValueError`
