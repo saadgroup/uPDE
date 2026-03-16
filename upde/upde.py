@@ -1,3 +1,26 @@
+# (c) 2026 Tony Saad <tony.saad@utah.edu>
+# University of Utah, Department of Chemical Engineering
+#
+# This file is part of uPDE.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
 """
 pde_solver.py
 =============
@@ -23,31 +46,10 @@ Dimensionality
 
 Coefficient / expr callables
 -----------------------------
-  Callables are always called with coordinates first, then keyword arguments.
-  The argument name 't' is reserved for the current solver time.
-
-  1D signatures:
-    f(x)                        — coordinates only
-    f(x, t)                     — coordinates + time
-    f(x, fieldA)                — coordinates + one field
-    f(x, t, fieldA)             — coordinates + time + one field
-    f(x, t, **fields)           — coordinates + time + all fields
-
-  2D signatures:
-    f(x, y)                     — coordinates only
-    f(x, y, t)                  — coordinates + time
-    f(x, y, fieldA)             — coordinates + one field
-    f(x, y, t, fieldA)          — coordinates + time + one field
-    f(x, y, t, **fields)        — coordinates + time + all fields
-
-  Rules:
-    - Coordinates (x, y) are always positional and always come first.
-    - t must come after coordinates and before field names.
-    - Only the parameters the callable actually declares are injected —
-      declare only what you need.
-    - 't' is a reserved name; PDE('t', ...) raises ValueError.
-    - Scalars and ndarrays are also accepted and broadcast appropriately.
-    - Extra fixed parameters should be captured via closures.
+  1D : f(x, **fields)           — x is 1D array (nx,)
+  2D : f(x, y, **fields)        — x, y are 2D meshgrid arrays (nx, ny)
+  Extra parameters captured via closures.
+  Scalars and ndarrays are also accepted and broadcast appropriately.
 
 Example — 2D heat equation
 ---------------------------
@@ -85,25 +87,6 @@ Example — 1D coupled reaction-diffusion
 
     sol = PDESystem([eqA, eqB, eqC]).solve(t_span=(0, 0.5), method='RK45')
     # sol.cA  ->  shape (256, nt)
-
-Example — time-dependent coefficients
---------------------------------------
-    # Wind field that varies with time (e.g. ERA5 reanalysis interpolated over t)
-    eq = PDE('C', x=x, y=y)
-    eq.add_advection(
-        velocity_x=lambda x, y, t: interp_U(t) * np.ones_like(x),
-        velocity_y=lambda x, y, t: interp_V(t) * np.ones_like(x),
-    )
-
-    # Source that shuts off after 6 hours
-    eq.add_source(
-        expr=lambda x, y, t, C: (source_map if t < 6*3600 else 0.0) - lam * C
-    )
-
-    # Closure over fixed parameters; no t needed
-    eq.add_diffusion(diffusivity=lambda x, y, C: D0 + alpha * C)
-
-    sol = eq.solve(t_span=(0, t_end), method='RK45')
 """
 
 import inspect
