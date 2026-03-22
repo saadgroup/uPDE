@@ -31,6 +31,7 @@ Example
 
 from .upde import PDE, PDESystem, PDESolution
 
+
 from .equations import (
     # Single-field
     HeatEquation,
@@ -42,6 +43,8 @@ from .equations import (
     WaveEquation,
     GrayScott,
     NavierStokes2D,
+    # chemistry is a submodule — users import as: from upde.chemistry import FlameletTable
+    MixtureFraction,
     # Base class (for isinstance checks / subclassing)
     NamedPDESystem,
 )

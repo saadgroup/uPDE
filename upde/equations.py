@@ -59,6 +59,9 @@ Multi-field (return NamedPDESystem):
     WaveEquation        -- d^2u/dt^2 = c^2 * laplacian(u)  [fields: u, ut]
     GrayScott           -- two-species reaction-diffusion    [fields: u, v]
     NavierStokes2D      -- 2D NS via artificial compressibility [fields: u, v, p]
+
+Combustion (return PDE):
+    MixtureFraction     -- dZ/dt + u·∇Z = ∇·(D∇Z)  [flamelet transport]
 """
 
 import numpy as np
@@ -633,3 +636,116 @@ def NavierStokes2D(u_name, v_name, p_name, x, y,
     eq_p.add_term(make_p_rhs(u_name, v_name, beta, pressure_stabilisation))
 
     return NamedPDESystem([eq_u, eq_v, eq_p], [u_name, v_name, p_name])
+
+
+# ---------------------------------------------------------------------------
+# 9. MixtureFraction
+# ---------------------------------------------------------------------------
+
+def MixtureFraction(field, x, y=None,
+                    velocity=None,
+                    velocity_x=None, velocity_y=None,
+                    diffusivity=1e-4):
+    """
+    Mixture-fraction transport equation for flamelet-based combustion:
+
+        ∂Z/∂t + c ∂Z/∂x = ∂(D ∂Z/∂x)/∂x           [1D]
+
+        ∂Z/∂t + u∂Z/∂x + v∂Z/∂y = ∇·(D∇Z)          [2D]
+
+    Z ∈ [0, 1] is the mixture fraction: Z = 0 is pure oxidiser,
+    Z = 1 is pure fuel.  The equation is a convection-diffusion equation
+    for a conserved scalar; no source term appears because no species are
+    created or destroyed in mixture-fraction space.
+
+    Thermochemical quantities (T, Y_k, ρ) are recovered *after* solving by
+    passing the Z solution through a :class:`~upde.chemistry.FlameletTable`::
+
+        from upde.chemistry import FlameletTable
+        table = FlameletTable.burke_schumann()
+        T_field = table.T(sol.Z[:, -1])        # 1-D final time
+
+    This factory is a thin wrapper around :func:`AdvectionDiffusion` with
+    a combustion-appropriate default diffusivity (D = 1e-4 m²/s, roughly
+    the thermal diffusivity of air at 300 K and 1 atm) and clear semantics.
+
+    Parameters
+    ----------
+    field       : str   — field name, e.g. 'Z'
+    x           : array — 1-D x-coordinate array
+    y           : array or None — 1-D y-coordinate array (activates 2D mode)
+    velocity    : scalar | ndarray | callable | str  — 1D convection speed
+    velocity_x  : scalar | ndarray | callable | str  — 2D x-velocity
+    velocity_y  : scalar | ndarray | callable | str  — 2D y-velocity
+    diffusivity : scalar | ndarray | callable        — scalar diffusivity D
+                  (default 1e-4 m²/s; set to D/Le for non-unity Lewis number)
+
+    Returns
+    -------
+    PDE
+
+    Physical notes
+    --------------
+    * The mixture fraction Z is a *conserved* scalar: its only source of
+      change is convection and molecular diffusion.  No chemical source term
+      appears in the transport equation — that is the key advantage of the
+      mixture-fraction formulation.
+
+    * For non-unity Lewis number (Le = α/D_species ≠ 1), pass
+      ``diffusivity = alpha / Le`` where alpha is the thermal diffusivity.
+
+    * Boundary conditions:
+        - Fuel inlet:      Z = 1  (Dirichlet)
+        - Oxidiser inlet:  Z = 0  (Dirichlet)
+        - Walls / outlets: ∂Z/∂n = 0  (Neumann, zero-flux)
+
+    * After solving, use :class:`~upde.chemistry.FlameletTable` to reconstruct
+      T, Y_k, and ρ from the Z field at any time snapshot.
+
+    Examples
+    --------
+    1-D counterflow flame (steady-state Z profile):
+
+        from upde import MixtureFraction, PDESystem
+        from upde.chemistry import FlameletTable
+
+        x  = np.linspace(0, 1, 256)
+        eq = MixtureFraction('Z', x=x, diffusivity=1e-4)
+        eq.set_bc(side='left',  kind='dirichlet', value=0.0)  # oxidiser
+        eq.set_bc(side='right', kind='dirichlet', value=1.0)  # fuel
+        eq.set_ic(lambda x: x)
+        sol = PDESystem([eq]).solve(t_span=(0, 50), method='BDF')
+
+        table   = FlameletTable.burke_schumann()
+        T_final = table.T(sol.Z[:, -1])
+
+    2-D reacting jet (Z coupled to prescribed velocity field):
+
+        from upde import MixtureFraction, PDESystem
+
+        x  = np.linspace(0, 2, 200)
+        y  = np.linspace(0, 1, 100)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+
+        # Parabolic jet velocity: u(y) = U_jet for |y-0.5| < r, else U_co
+        u_field = np.where(np.abs(Y - 0.5) < 0.1, 1.0, 0.1)
+
+        eq = MixtureFraction('Z', x=x, y=y,
+                              velocity_x=u_field, velocity_y=0.0,
+                              diffusivity=1e-4)
+        eq.set_bc(side='left',   kind='dirichlet',
+                  value=lambda x, y: np.where(np.abs(y - 0.5) < 0.1, 1.0, 0.0))
+        eq.set_bc(side='right',  kind='neumann', value=0.0)
+        eq.set_bc(side='bottom', kind='neumann', value=0.0)
+        eq.set_bc(side='top',    kind='neumann', value=0.0)
+        eq.set_ic(0.0)
+        sol = PDESystem([eq]).solve(t_span=(0, 2), method='BDF')
+    """
+    return AdvectionDiffusion(
+        field, x=x, y=y,
+        velocity=velocity,
+        velocity_x=velocity_x,
+        velocity_y=velocity_y,
+        diffusivity=diffusivity,
+    )
+

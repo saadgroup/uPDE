@@ -14,6 +14,7 @@ integrators without writing a single line of time-stepping code.
 - Dirichlet, Neumann, and periodic boundary conditions
 - Interior boundary conditions for obstacles and inclusions
 - Pre-built equation prototypes for common PDE families
+- Flamelet-based combustion via mixture-fraction transport and `FlameletTable`
 - Pure NumPy / SciPy — no compilation, no external mesh libraries
 
 ---
@@ -41,6 +42,11 @@ integrators without writing a single line of time-stepping code.
   - [WaveEquation](#waveequation)
   - [GrayScott](#grayscott)
   - [NavierStokes2D](#navierstokes2d)
+  - [MixtureFraction](#mixturefraction)
+- [Combustion and Flamelet Chemistry](#combustion-and-flamelet-chemistry)
+  - [FlameletTable](#flamelettable)
+  - [Workflow](#workflow)
+  - [Using Cantera](#using-cantera)
 - [API Reference](#api-reference)
   - [PDE](#pde)
   - [PDESystem](#pdesystem)
@@ -62,8 +68,8 @@ git clone https://github.com/tsaad-dev/upde.git
 cd upde
 pip install -e .
 
-# or just copy the two files
-cp upde.py equations.py your_project/
+# or just copy the files
+cp upde.py equations.py chemistry.py your_project/
 ```
 
 **Requirements:**
@@ -73,6 +79,16 @@ cp upde.py equations.py your_project/
 | numpy   | ≥ 1.22  |
 | scipy   | ≥ 1.8   |
 | python  | ≥ 3.9   |
+
+**Optional — for high-fidelity flamelet table generation:**
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| cantera | ≥ 3.0   | `FlameletTable.from_cantera()` — 1-D counterflow flame |
+
+Cantera is only needed to *generate* a flamelet table. Once saved with
+`table.save('ch4_air.npz')`, the table can be reloaded with
+`FlameletTable.from_file()` on any machine without Cantera installed.
 
 ---
 
@@ -392,7 +408,8 @@ so the full API remains available after construction.
 ```python
 from upde import (HeatEquation, AdvectionDiffusion, Burgers,
                   ConservationLaw, ReactionDiffusion,
-                  WaveEquation, GrayScott, NavierStokes2D)
+                  WaveEquation, GrayScott, NavierStokes2D,
+                  MixtureFraction)
 ```
 
 **1D vs 2D:** all single-field factories support both 1D and 2D — pass `y` to activate
@@ -719,6 +736,183 @@ ns.p.set_interior_bc(cyl, kind='neumann')
 > For tighter incompressibility, increase $\beta$ (at the cost of stiffness).
 
 ---
+
+### MixtureFraction
+
+$$\frac{\partial Z}{\partial t} + \mathbf{u}\cdot\nabla Z = \nabla\cdot(D\,\nabla Z)$$
+
+```python
+MixtureFraction(field, x, y=None,
+                velocity=None, velocity_x=None, velocity_y=None,
+                diffusivity=1e-4)
+```
+
+Mixture-fraction transport for flamelet-based non-premixed combustion.
+$Z \in [0,1]$ is a conserved scalar: $Z=0$ is pure oxidiser, $Z=1$ is pure fuel.
+No chemical source term appears — the stiff combustion chemistry is entirely
+pre-tabulated in a `FlameletTable` and evaluated after the solve.
+
+This is a named wrapper around `AdvectionDiffusion` with a combustion-appropriate
+default diffusivity ($D = 10^{-4}$ m²/s, the thermal diffusivity of air at 300 K).
+
+```python
+from upde import MixtureFraction, PDESystem
+from upde.chemistry import FlameletTable
+
+x     = np.linspace(0, 1, 256)
+table = FlameletTable.burke_schumann()
+
+eq = MixtureFraction('Z', x=x, diffusivity=1e-4)
+eq.set_bc(side='left',  kind='dirichlet', value=0.0)   # oxidiser
+eq.set_bc(side='right', kind='dirichlet', value=1.0)   # fuel
+eq.set_ic(lambda x: x)
+
+sol = PDESystem([eq]).solve(t_span=(0, 5000), method='BDF')
+
+# Reconstruct thermochemistry from the flamelet table
+T_field = table.T(sol.Z[:, -1])          # temperature [K]
+Y_CH4   = table.Y('CH4', sol.Z[:, -1])   # fuel mass fraction
+```
+
+Couple to a velocity field from `NavierStokes2D` by passing string references:
+
+```python
+zz = MixtureFraction('Z', x=x, y=y,
+                     velocity_x='u', velocity_y='v',
+                     diffusivity=1e-4)
+sol = PDESystem([ns.u_eq, ns.v_eq, ns.p_eq, zz]).solve(...)
+```
+
+> **Solver note:** use `method='BDF'` for diffusion-dominated problems.
+> Advection-dominated jets at moderate Péclet number can use `'RK45'`.
+
+---
+
+## Combustion and Flamelet Chemistry
+
+uPDE supports non-premixed combustion via the **mixture-fraction / flamelet approach**:
+the transport equation for $Z$ is solved by `solve_ivp` as a pure convection-diffusion
+problem (no stiff chemistry), and temperature and species are reconstructed afterward
+from a pre-integrated flamelet table.
+
+This completely avoids the extreme stiffness of full chemistry mechanisms — the
+`solve_ivp` integrator never sees chemical timescales.
+
+### FlameletTable
+
+```python
+from upde.chemistry import FlameletTable
+```
+
+Maps $Z \in [0,1]$ to temperature and species mass fractions via `numpy.interp`.
+
+#### Construction
+
+```python
+# 1. Analytic Burke-Schumann (no dependencies — good for education and testing)
+table = FlameletTable.burke_schumann(
+    Z_st=0.055,     # stoichiometric mixture fraction (CH4/air default)
+    T_fuel=300.0,   # fuel-stream temperature [K]
+    T_ox=300.0,     # oxidiser-stream temperature [K]
+    T_ad=2230.0,    # adiabatic flame temperature [K]
+)
+
+# 2. Load a previously saved table (no Cantera at solve time)
+table = FlameletTable.from_file('ch4_air.npz')
+
+# 3. From raw arrays (user-supplied data)
+table = FlameletTable(Z_grid, T, species={'CH4': Y_CH4, 'O2': Y_O2, ...})
+
+# 4. From Cantera counterflow flame (requires pip install cantera)
+table = FlameletTable.from_cantera(
+    mechanism='gri30.yaml',
+    fuel='CH4',
+    oxidizer='O2:0.21,N2:0.79',
+    T_fuel=300.0, T_ox=300.0,
+)
+table.save('ch4_air_gri30.npz')
+```
+
+#### Accessors
+
+All accessors accept any numpy array shape. $Z$ is automatically clipped to $[0,1]$.
+
+```python
+T_field   = table.T(Z)                   # temperature [K]
+Y_CH4     = table.Y('CH4', Z)            # species mass fraction
+rho_field = table.rho(Z, P=101325.0)     # density [kg/m³] from ideal gas law
+
+print(table.species)   # ['CH4', 'O2', 'CO2', 'H2O', 'N2']
+print(table.Z_st)      # stoichiometric mixture fraction (location of peak T)
+```
+
+#### Serialisation
+
+```python
+table.save('ch4_air.npz')
+table = FlameletTable.from_file('ch4_air.npz')
+```
+
+---
+
+### Workflow
+
+```python
+import numpy as np
+from upde import MixtureFraction, PDESystem
+from upde.chemistry import FlameletTable
+
+# Step 1 — build the chemistry table (once)
+table = FlameletTable.burke_schumann()
+
+# Step 2 — set up Z transport
+x  = np.linspace(0, 1, 256)
+eq = MixtureFraction('Z', x=x, diffusivity=1e-4)
+eq.set_bc(side='left',  kind='dirichlet', value=0.0)
+eq.set_bc(side='right', kind='dirichlet', value=1.0)
+eq.set_ic(0.0)
+
+# Step 3 — solve (no stiff chemistry in the ODE!)
+sol = PDESystem([eq]).solve(t_span=(0, 5000), method='BDF',
+                             rtol=1e-6, atol=1e-8)
+
+# Step 4 — reconstruct thermochemistry (instant — just numpy.interp)
+Z_final = sol.Z[:, -1]
+T       = table.T(Z_final)
+Y_CH4   = table.Y('CH4', Z_final)
+rho     = table.rho(Z_final)
+
+x_flame = x[np.argmax(T)]
+print(f'Flame location: x = {x_flame:.4f}  (Z_st = {table.Z_st:.4f})')
+```
+
+---
+
+### Using Cantera
+
+`FlameletTable.from_cantera()` requires `pip install cantera`. It runs a 1-D
+counterflow diffusion flame, extracts $Z$–$T$–$Y_k$ profiles via Bilger's
+definition, and returns a ready-to-use `FlameletTable`. Save the result so
+Cantera is only needed once:
+
+```python
+# Run once (needs Cantera)
+table = FlameletTable.from_cantera(
+    mechanism='gri30.yaml',
+    fuel='CH4',
+    oxidizer='O2:0.21,N2:0.79',
+)
+table.save('ch4_air_gri30.npz')
+
+# All subsequent runs — no Cantera needed
+table = FlameletTable.from_file('ch4_air_gri30.npz')
+```
+
+If Cantera is not installed, a helpful `ImportError` is raised. Use
+`FlameletTable.burke_schumann()` as a self-contained alternative.
+
+---
+
 
 ## API Reference
 

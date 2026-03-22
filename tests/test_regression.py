@@ -34,8 +34,8 @@ Problems
 import numpy as np
 import pytest
 
-from upde import PDE, PDESystem, HeatEquation, AdvectionDiffusion, Burgers, WaveEquation
-
+from upde import PDE, PDESystem, HeatEquation, AdvectionDiffusion, Burgers, WaveEquation, MixtureFraction
+from upde.chemistry import FlameletTable
 
 # ---------------------------------------------------------------------------
 # 1-D regression tests
@@ -202,4 +202,62 @@ def test_reg_wave(snapshot, grid_1d_64):
     snapshot.check("reg_wave", {
         "u_t0":   sol.u[:, 0],
         "u_tfin": sol.u[:, -1],
+    })
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chemistry / MixtureFraction regression (golden-file) tests
+# Add these three functions to tests/test_regression.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_reg_flamelet_burke_schumann(snapshot):
+    """Golden-file test: Burke-Schumann T and Y_k profiles across Z ∈ [0, 1]."""
+    from upde.chemistry import FlameletTable
+    table = FlameletTable.burke_schumann(
+        Z_st=0.055, T_fuel=300.0, T_ox=300.0, T_ad=2230.0
+    )
+    Z = np.linspace(0, 1, 100)
+    snapshot.check("reg_flamelet_bs", {
+        "T":     table.T(Z),
+        "Y_CH4": table.Y('CH4', Z),
+        "Y_O2":  table.Y('O2',  Z),
+        "Y_CO2": table.Y('CO2', Z),
+        "Y_H2O": table.Y('H2O', Z),
+        "Y_N2":  table.Y('N2',  Z),
+    })
+
+
+def test_reg_mixture_fraction_1d(snapshot):
+    """Golden-file test: 1-D mixture-fraction transient diffusion (step IC)."""
+    nx  = 64
+    x   = np.linspace(0, 1, nx)
+    eq  = MixtureFraction('Z', x=x, diffusivity=1e-3)
+    eq.set_bc(side='left',  kind='dirichlet', value=0.0)
+    eq.set_bc(side='right', kind='dirichlet', value=1.0)
+    eq.set_ic(lambda x: (x > 0.5).astype(float))
+    t_eval = np.linspace(0, 0.5, 6)
+    sol = PDESystem([eq]).solve(
+        t_span=(0, 0.5), t_eval=t_eval, method='BDF', rtol=1e-8, atol=1e-10
+    )
+    assert sol.success
+    snapshot.check("reg_mixture_fraction_1d", {
+        "Z_t0":   sol.Z[:, 0],
+        "Z_tmid": sol.Z[:, 3],
+        "Z_tfin": sol.Z[:, -1],
+    })
+
+
+def test_reg_mixture_fraction_1d_advection(snapshot):
+    """Golden-file test: 1-D mixture fraction with mean convection (u=0.05)."""
+    nx = 64
+    x  = np.linspace(0, 1, nx)
+    eq = MixtureFraction('Z', x=x, velocity=0.05, diffusivity=1e-3)
+    eq.set_bc(side='left',  kind='dirichlet', value=0.0)
+    eq.set_bc(side='right', kind='dirichlet', value=1.0)
+    eq.set_ic(lambda x: x)
+    sol = PDESystem([eq]).solve(
+        t_span=(0, 2.0), method='BDF', rtol=1e-8, atol=1e-10
+    )
+    assert sol.success
+    snapshot.check("reg_mixture_fraction_1d_advection", {
+        "Z_final": sol.Z[:, -1],
     })

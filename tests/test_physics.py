@@ -25,8 +25,8 @@ Notes on tolerances
 import numpy as np
 import pytest
 
-from upde import PDE, PDESystem, HeatEquation, AdvectionDiffusion, WaveEquation
-
+from upde import PDE, PDESystem, HeatEquation, AdvectionDiffusion, WaveEquation, MixtureFraction
+from upde.chemistry import FlameletTable
 
 def test_diffusion_steady_state(grid_1d_64):
     """
@@ -137,3 +137,65 @@ def test_wave_energy_nongrowth(grid_1d_64):
             f"Wave energy grew by {rel_growth*100:.2f}% at t={t_eval[k]:.2f} "
             f"(upwind scheme should only dissipate)"
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chemistry / MixtureFraction physics tests
+# Add these four functions to tests/test_physics.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_flamelet_table_boundary_values():
+    """Burke-Schumann table: correct temperatures and species at Z=0 and Z=1."""
+    from upde.chemistry import FlameletTable
+    table = FlameletTable.burke_schumann(T_fuel=300.0, T_ox=300.0, T_ad=2230.0)
+    Z0, Z1 = np.array([0.0]), np.array([1.0])
+
+    assert abs(table.T(Z0)[0] - 300.0) < 1.0,   "T(Z=0) should equal T_ox=300 K"
+    assert abs(table.T(Z1)[0] - 300.0) < 1.0,   "T(Z=1) should equal T_fuel=300 K"
+    assert table.T(np.array([table.Z_st]))[0] > 2000.0, "Peak T must exceed 2000 K"
+
+    assert table.Y('CH4', Z0)[0] < 1e-10,            "No CH4 in pure air"
+    assert table.Y('CO2', Z0)[0] < 1e-10,            "No CO2 in pure air"
+    assert abs(table.Y('O2', Z0)[0] - 0.233) < 0.01, "Y_O2 ~ 0.233 in air"
+    assert abs(table.Y('N2', Z0)[0] - 0.767) < 0.01, "Y_N2 ~ 0.767 in air"
+    assert abs(table.Y('CH4', Z1)[0] - 1.0) < 1e-10, "Y_CH4 = 1 at Z=1"
+    assert table.Y('O2', Z1)[0] < 1e-10,             "No O2 in pure fuel"
+
+
+def test_flamelet_table_species_sum():
+    """Sum of all mass fractions must equal 1 everywhere in Z ∈ [0, 1]."""
+    from upde.chemistry import FlameletTable
+    table = FlameletTable.burke_schumann()
+    Z     = np.linspace(0, 1, 200)
+    Y_sum = sum(table.Y(sp, Z) for sp in table.species)
+    assert np.allclose(Y_sum, 1.0, atol=1e-10), \
+        f"Sum Y_k != 1; max deviation = {np.max(np.abs(Y_sum - 1)):.2e}"
+
+
+def test_flamelet_table_density():
+    """Ideal-gas density at Z=0 (cold air, 300 K) should be ~1.18 kg/m³."""
+    from upde.chemistry import FlameletTable
+    table   = FlameletTable.burke_schumann(T_ox=300.0)
+    rho_air = table.rho(np.array([0.0]), P=101325.0)[0]
+    assert 1.0 < rho_air < 1.4, \
+        f"rho(air) = {rho_air:.3f} kg/m³; expected ~1.18"
+
+
+def test_mixture_fraction_1d_steady_state():
+    """
+    Pure diffusion to steady state between Z=0 (left) and Z=1 (right)
+    must yield Z(x) = x to machine precision.
+    """
+    from upde import MixtureFraction, PDESystem
+    nx = 64
+    x  = np.linspace(0, 1, nx)
+    eq = MixtureFraction('Z', x=x, diffusivity=1e-2)
+    eq.set_bc(side='left',  kind='dirichlet', value=0.0)
+    eq.set_bc(side='right', kind='dirichlet', value=1.0)
+    eq.set_ic(lambda x: x)   # start at steady state → converges immediately
+    sol = PDESystem([eq]).solve(
+        t_span=(0, 5.0), method='BDF', rtol=1e-8, atol=1e-10
+    )
+    assert sol.success
+    max_err = np.max(np.abs(sol.Z[:, -1] - x))
+    assert max_err < 1e-4, \
+        f"Steady-state Z should be linear (Z=x); max error = {max_err:.2e}"
