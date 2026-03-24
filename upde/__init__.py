@@ -1,3 +1,7 @@
+# Last modified: 2026-03-24 14:51 UTC
+# upde/__init__.py
+# Flat namespace — import everything users need directly from the submodules.
+
 """
 upde — A lightweight Python library for solving PDEs via the method of lines.
 
@@ -29,7 +33,7 @@ Example
     # sol.T  shape (256, nt)
 """
 
-from .upde import PDE, PDESystem, PDESolution
+from .upde import PDE, PDESystem, PDESolution, SteadySolution
 
 
 from .equations import (
@@ -63,3 +67,7 @@ __all__ = [
     "WaveEquation", "GrayScott", "NavierStokes2D",
     "NamedPDESystem",
 ]
+
+# Optional: chemistry submodule is imported on demand, not re-exported here,
+# to avoid a hard dependency on its optional FlameletTable requirements.
+# Users do:  from upde.chemistry import FlameletTable

@@ -1,11 +1,13 @@
+<!-- Last modified: 2026-03-24 14:51 UTC -->
 # uPDE
 
 > A lightweight Python library for solving 1D and 2D PDEs using the method of lines.
 
 uPDE lets you describe a PDE — its terms, coefficients, boundary conditions, and initial
-data — and hands the spatial right-hand side directly to `scipy.integrate.solve_ivp`.
-You get adaptive step control, stiffness detection, and a choice of explicit and implicit
-integrators without writing a single line of time-stepping code.
+data — and delegates the hard work to SciPy. Transient problems go to
+`scipy.integrate.solve_ivp`; steady-state problems go to `scipy.optimize.root`.
+You get adaptive time-stepping, stiffness detection, and Newton iteration without
+writing any solver code yourself.
 
 **Features:**
 - 1D and 2D problems on uniform Cartesian grids
@@ -13,6 +15,8 @@ integrators without writing a single line of time-stepping code.
 - Scalar, array, and callable (nonlinear, field-dependent, or time-dependent) coefficients
 - Dirichlet, Neumann, and periodic boundary conditions
 - Interior boundary conditions for obstacles and inclusions
+- **Transient solver** — method of lines via `scipy.integrate.solve_ivp`
+- **Steady-state solver** — `solve_steady()` via `scipy.optimize.root`; works for linear and nonlinear problems with no user-facing distinction
 - Pre-built equation prototypes for common PDE families
 - Flamelet-based combustion via mixture-fraction transport and `FlameletTable`
 - Pure NumPy / SciPy — no compilation, no external mesh libraries
@@ -23,6 +27,8 @@ integrators without writing a single line of time-stepping code.
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+  - [Transient problem](#transient-problem)
+  - [Steady-state problem](#steady-state-problem)
 - [Core Concepts](#core-concepts)
 - [User Guide](#user-guide)
   - [Coefficients and Callables](#coefficients-and-callables)
@@ -32,25 +38,15 @@ integrators without writing a single line of time-stepping code.
   - [Coupled Systems](#coupled-systems)
   - [2D Problems](#2d-problems)
   - [Interior Boundary Conditions](#interior-boundary-conditions)
-  - [Choosing a Solver](#choosing-a-solver)
+  - [Choosing a Transient Solver](#choosing-a-transient-solver)
+  - [Steady-State Problems](#steady-state-problems)
 - [Pre-built Equations](#pre-built-equations)
-  - [HeatEquation](#heatequation)
-  - [AdvectionDiffusion](#advectiondiffusion)
-  - [Burgers](#burgers)
-  - [ConservationLaw](#conservationlaw)
-  - [ReactionDiffusion](#reactiondiffusion)
-  - [WaveEquation](#waveequation)
-  - [GrayScott](#grayscott)
-  - [NavierStokes2D](#navierstokes2d)
-  - [MixtureFraction](#mixturefraction)
 - [Combustion and Flamelet Chemistry](#combustion-and-flamelet-chemistry)
-  - [FlameletTable](#flamelettable)
-  - [Workflow](#workflow)
-  - [Using Cantera](#using-cantera)
 - [API Reference](#api-reference)
   - [PDE](#pde)
   - [PDESystem](#pdesystem)
   - [PDESolution](#pdesolution)
+  - [SteadySolution](#steadysolution)
   - [Operator Reference](#operator-reference)
 - [Numerical Methods](#numerical-methods)
 - [Troubleshooting](#troubleshooting)
@@ -59,16 +55,17 @@ integrators without writing a single line of time-stepping code.
 
 ## Installation
 
-uPDE has no compiled dependencies. Drop `upde.py` and `equations.py` into your project,
-or install from the repository:
+uPDE has no compiled dependencies. Install from the repository:
 
 ```bash
-# editable install from source
 git clone https://github.com/tsaad-dev/upde.git
 cd upde
 pip install -e .
+```
 
-# or just copy the files
+Or drop the source files directly into your project:
+
+```bash
 cp upde.py equations.py chemistry.py your_project/
 ```
 
@@ -76,7 +73,7 @@ cp upde.py equations.py chemistry.py your_project/
 
 | Package | Version |
 |---------|---------|
-| numpy   | ≥ 1.22  |
+| numpy   | ≥ 2.0   |
 | scipy   | ≥ 1.8   |
 | python  | ≥ 3.9   |
 
@@ -94,6 +91,8 @@ Cantera is only needed to *generate* a flamelet table. Once saved with
 
 ## Quick Start
 
+### Transient problem
+
 ```python
 import numpy as np
 from upde import PDE, PDESystem
@@ -106,23 +105,36 @@ eq.set_bc(side='left',  kind='dirichlet', value=1.0)
 eq.set_bc(side='right', kind='dirichlet', value=0.0)
 eq.set_ic(0.0)
 
-sol = PDESystem([eq]).solve(t_span=(0, 1), method='RK45')
+sol = eq.solve(t_span=(0, 1), method='BDF')
 # sol.T         shape (256, nt)
 # sol.T[:, -1]  final profile
 # sol.t         time points
 ```
 
-Or use a pre-built equation prototype and call `solve` directly on it:
+### Steady-state problem
 
 ```python
-from upde import PDESystem, HeatEquation
+import numpy as np
+from upde import PDE
 
-eq = HeatEquation('T', x=x, diffusivity=0.05)
+x = np.linspace(0, 1, 256)
+
+eq = PDE('T', x=x)
+eq.add_diffusion(diffusivity=0.05)
 eq.set_bc(side='left',  kind='dirichlet', value=1.0)
 eq.set_bc(side='right', kind='dirichlet', value=0.0)
-eq.set_ic(0.0)
 
-sol = eq.solve(t_span=(0, 1), method='BDF')   # shorthand for uncoupled equations
+sol = eq.solve_steady()
+# sol.T     shape (256,)  — no time dimension
+# sol.residual   max|RHS| at solution
+```
+
+No initial condition is needed for steady-state problems. A nonlinear problem
+is solved identically — just pass a reasonable starting guess:
+
+```python
+eq.add_diffusion(diffusivity=lambda x, T: 1 + T**2)   # nonlinear k
+sol = eq.solve_steady(guess=np.linspace(1.0, 0.0, 256))
 ```
 
 ---
@@ -135,16 +147,19 @@ A `PDE` object holds the mathematical description of one equation: its field nam
 spatial grid, terms (advection, diffusion, source, flux), boundary conditions, and
 initial condition. It never solves anything on its own.
 
-`PDE.solve()` is available as a convenience for equations that do not reference any
-external field. For coupled equations, use `PDESystem` explicitly.
+`PDE.solve()` and `PDE.solve_steady()` are available as convenience wrappers for
+equations that do not reference any external field. For coupled equations, use
+`PDESystem` explicitly.
 
 ### PDESystem — the solver
 
 `PDESystem` takes a list of `PDE` objects, validates that all field references are
-consistent, assembles the joint state vector, and calls `solve_ivp`. Even single-equation
-problems can use `PDESystem([eq]).solve(...)`.
+consistent, assembles the joint state vector, and delegates to SciPy:
 
-### PDESolution — the result
+- `PDESystem.solve(t_span, ...)` → calls `scipy.integrate.solve_ivp`
+- `PDESystem.solve_steady(guess=None, ...)` → calls `scipy.optimize.root`
+
+### PDESolution — transient result
 
 Fields are accessed by name as attributes. Spatial indices come first, time last:
 
@@ -158,13 +173,29 @@ sol.message     # integrator status string
 sol.raw         # raw scipy OdeResult
 ```
 
+### SteadySolution — steady-state result
+
+```python
+sol.T           # (nx,) in 1D  |  (nx, ny) in 2D  — no time dimension
+sol.success     # bool (see note below)
+sol.residual    # max|RHS(φ)| at solution — primary convergence indicator
+sol.nfev        # number of RHS evaluations
+sol.message     # convergence message
+sol.raw         # raw scipy OptimizeResult
+```
+
+> **Note on `sol.success`:** `scipy.optimize.root` with `method='hybr'` (the default)
+> occasionally reports `success=False` even when the solution is correct, particularly
+> when starting from an all-zero guess. Always treat `sol.residual < 1e-8` as the
+> authoritative convergence check.
+
 ---
 
 ## User Guide
 
 ### Coefficients and Callables
 
-Every coefficient in uPDE — diffusivity, velocity, source — accepts three forms:
+Every coefficient in uPDE — diffusivity, velocity, source — accepts four forms:
 
 | Form | Example |
 |------|---------|
@@ -185,20 +216,36 @@ function actually declares:
 | 1D | `f(x, t)` | coordinates + current time |
 | 1D | `f(x, fieldA)` | coordinates + one field |
 | 1D | `f(x, t, fieldA)` | coordinates + time + one field |
-| 1D | `f(x, t, **fields)` | coordinates + time + all fields |
+| 1D | `f(x, **fields)` | coordinates + all fields |
 | 2D | `f(x, y)` | coordinates only |
 | 2D | `f(x, y, t)` | coordinates + time |
 | 2D | `f(x, y, fieldA)` | coordinates + one field |
-| 2D | `f(x, y, t, fieldA)` | coordinates + time + one field |
 | 2D | `f(x, y, t, **fields)` | coordinates + time + all fields |
 
-The ordering rule is: **coordinates → t → field names**. `t` is a reserved name
-and cannot be used as a field name. Fixed parameters go in via closures:
+The ordering rule is: **coordinates → t → field names**. `t` is reserved and
+cannot be used as a field name. Fixed parameters go in via closures:
 
 ```python
 k1 = 10.0
 eq.add_source(expr=lambda x, cA, cB: -k1 * cA * cB)  # k1 captured by closure
 ```
+
+---
+
+### Time-Dependent Callables
+
+Declare `t` in your callable signature and uPDE injects the current solver time:
+
+```python
+# Source that shuts off at t = 0.1
+eq.add_source(expr=lambda x, t: np.where(t < 0.1, 1.0, 0.0) * np.ones_like(x))
+
+# Time-varying Dirichlet BC
+eq.set_bc(side='left', kind='dirichlet', value=lambda t: np.sin(2 * np.pi * t))
+```
+
+Time-dependent callables work with transient solves. For `solve_steady()`, time is
+fixed at `t=0` and is generally not meaningful.
 
 ---
 
@@ -224,10 +271,10 @@ eq.set_bc(side='left',  kind='neumann', value=2.5)   # prescribed flux
 #### Periodic
 
 ```python
-eq.set_bc(kind='periodic')          # 1D
-eq.set_bc(kind='periodic', side='x')    # 2D — wrap left ↔ right
-eq.set_bc(kind='periodic', side='y')    # 2D — wrap bottom ↔ top
-eq.set_bc(kind='periodic', side='all')  # 2D — fully periodic
+eq.set_bc(kind='periodic')                # 1D
+eq.set_bc(kind='periodic', side='x')     # 2D — wrap left ↔ right
+eq.set_bc(kind='periodic', side='y')     # 2D — wrap bottom ↔ top
+eq.set_bc(kind='periodic', side='all')   # 2D — fully periodic
 ```
 
 #### Side shortcuts
@@ -253,550 +300,331 @@ eq.set_bc(mask=mask, kind='dirichlet', value=2.0)
 
 ### Initial Conditions
 
-```python
-eq.set_ic(0.0)                                           # scalar constant
-eq.set_ic(np.zeros(n))                                   # 1D array
-eq.set_ic(lambda x: np.sin(np.pi * x))                  # 1D callable
-eq.set_ic(lambda x, y: np.sin(np.pi*x)*np.sin(np.pi*y)) # 2D callable
+Required for transient problems; not used by `solve_steady()`.
 
-# override at solve time (useful for parameter sweeps)
-sol = PDESystem([eq]).solve(t_span=(0, 1), ICs={'T': new_ic})
+```python
+eq.set_ic(0.0)                             # scalar — uniform field
+eq.set_ic(np.sin(np.pi * x))              # array
+eq.set_ic(lambda x: np.sin(np.pi * x))   # 1D callable
+eq.set_ic(lambda x, y: np.sin(np.pi * x) * np.sin(np.pi * y))  # 2D callable
 ```
+
+Dirichlet boundary nodes are automatically snapped to their BC values at `t=t0`,
+so the IC does not need to be consistent with the BCs.
 
 ---
 
 ### Coupled Systems
 
-Multi-field problems are built by creating one `PDE` per field and passing them all to
-`PDESystem`. Fields reference each other by string name. `PDESystem` validates all
-references at construction time.
+Field names in callables create couplings. Declare all equations together in a
+`PDESystem`:
 
 ```python
+x  = np.linspace(0, 1, 256)
 k1 = 10.0
 
 eqA = PDE('cA', x=x)
-eqA.add_diffusion(diffusivity=1.0)
+eqA.add_diffusion(diffusivity=0.01)
 eqA.add_source(expr=lambda x, cA, cB: -k1 * cA * cB)
+eqA.set_bc(side='left',  kind='dirichlet', value=5.0)
+eqA.set_bc(side='right', kind='dirichlet', value=0.0)
+eqA.set_ic(0.0)
 
 eqB = PDE('cB', x=x)
-eqB.add_diffusion(diffusivity=1.0)
+eqB.add_diffusion(diffusivity=0.01)
 eqB.add_source(expr=lambda x, cA, cB: -k1 * cA * cB)
+eqB.set_bc(side='left',  kind='dirichlet', value=0.0)
+eqB.set_bc(side='right', kind='dirichlet', value=5.0)
+eqB.set_ic(0.0)
 
-sol = PDESystem([eqA, eqB]).solve(t_span=(0, 0.5), method='RK45')
-# sol.cA, sol.cB — each shape (n, nt)
+# Transient
+sol = PDESystem([eqA, eqB]).solve((0, 0.5), method='RK45')
+# sol.cA  shape (256, nt)
+# sol.cB  shape (256, nt)
+
+# Steady-state — no ICs needed, provide an initial guess instead
+sol = PDESystem([eqA, eqB]).solve_steady(
+    guess={'cA': np.linspace(5, 0, 256),
+           'cB': np.linspace(0, 5, 256)}
+)
+# sol.cA  shape (256,)
+# sol.cB  shape (256,)
 ```
+
+`PDESystem` validates field references at construction time — a typo in a field name
+raises immediately before any solve.
 
 ---
 
 ### 2D Problems
 
-Pass a second grid `y` to the `PDE` constructor. Everything else uses the same API.
+Pass `y=` to `PDE` to activate 2D mode. Everything else — terms, BCs, ICs — works
+identically.
 
 ```python
 x = np.linspace(0, 1, 64)
 y = np.linspace(0, 1, 64)
 
 eq = PDE('T', x=x, y=y)
+eq.add_diffusion(diffusivity=1.0)
+eq.set_bc(side='left',   kind='dirichlet', value=1.0)
+eq.set_bc(side='right',  kind='dirichlet', value=0.0)
+eq.set_bc(side='bottom', kind='neumann',   value=0.0)
+eq.set_bc(side='top',    kind='neumann',   value=0.0)
 
-eq.add_diffusion(diffusivity=0.05)                      # isotropic
-eq.add_diffusion(diffusivity_x=0.1, diffusivity_y=0.005) # anisotropic
-eq.add_advection(velocity_x=1.0, velocity_y=0.5)        # 2D advection
+# Transient
+eq.set_ic(0.0)
+sol = eq.solve((0, 1.0), method='BDF')
+# sol.T  shape (64, 64, nt)
 
-# sol.T has shape (64, 64, nt)
+# Steady-state
+sol = eq.solve_steady()
+# sol.T  shape (64, 64)
 ```
 
-> **Stiffness:** 2D diffusion is always stiff — explicit stability requires
-> Δt ∼ Δx². Use `method='BDF'` for diffusion-dominated 2D problems.
-
----
-
-### Time-Dependent Callables
-
-Any coefficient — velocity, diffusivity, or source — can depend on the current
-solver time `t` by declaring it as a parameter after the spatial coordinates.
-No other changes to your code are required.
+In 2D, `x` and `y` are passed as 2D meshgrid arrays `(nx, ny)` to callables:
 
 ```python
-import numpy as np
-from upde import PDE
-
-x = np.linspace(0, 1, 128)
-
-eq = PDE('C', x=x)
-
-# Velocity that ramps up linearly over the first 10 seconds
-eq.add_advection(velocity=lambda x, t: min(t / 10.0, 1.0) * np.ones_like(x))
-
-# Source that shuts off after 6 hours
-eq.add_source(expr=lambda x, t, C: (1.0 if t < 6*3600 else 0.0) - 0.01 * C)
-
-# Diffusivity from a time-interpolated dataset (e.g. ERA5 reanalysis)
-import scipy.interpolate as interp
-D_interp = interp.interp1d(time_points, D_values)
-eq.add_diffusion(diffusivity=lambda x, t: D_interp(t) * np.ones_like(x))
-
-eq.set_bc(kind='periodic')
-eq.set_ic(ic)
-sol = eq.solve(t_span=(0, 86400), method='RK45')
+eq.add_diffusion(diffusivity=lambda x, y, T: 1 + 0.5 * np.sin(np.pi * x) * T)
 ```
-
-For 2D, `t` comes after both spatial coordinates:
-
-```python
-eq2d = PDE('C', x=x, y=y)
-
-# Time-varying 2D wind field
-eq2d.add_advection(
-    velocity_x=lambda x, y, t: interp_U(t) * np.ones_like(x),
-    velocity_y=lambda x, y, t: interp_V(t) * np.ones_like(x),
-)
-```
-
-> **Note:** `t` is a reserved name. `PDE('t', ...)` raises a `ValueError`.
-> Use `'T'`, `'tau'`, or any other name for a temperature-like field.
 
 ---
 
 ### Interior Boundary Conditions
 
-`set_interior_bc` enforces a condition on an arbitrary boolean mask at every RHS
-evaluation — useful for obstacles, cylinders, and inclusions.
+Mark interior cells as obstacles or inclusions:
 
 ```python
-# Circular obstacle — no-slip
-cyl = (X - cx)**2 + (Y - cy)**2 < radius**2
-eq.set_interior_bc(cyl, kind='dirichlet', value=0.0)
+# Heated cylinder
+mask = (X - 0.5)**2 + (Y - 0.5)**2 < 0.1**2
+eq.set_interior_bc(mask, kind='dirichlet', value=2.0)
 
-# Insulating inclusion — zero flux (approximate)
-eq.set_interior_bc(inclusion_mask, kind='neumann')
+# Insulating obstacle (frozen at ambient value)
+eq.set_interior_bc(mask, kind='neumann')
 ```
 
-**Limitations:** the mask representation is first-order accurate (staircase surface).
-The Neumann condition freezes the interior RHS to zero, which approximates
-$\partial\phi/\partial n = 0$ but does not enforce it exactly on curved boundaries.
+Interior BCs are applied after all stencil terms at every RHS evaluation.
+Multiple obstacles can be registered on the same field with separate calls.
 
 ---
 
-### Choosing a Solver
+### Choosing a Transient Solver
 
-| Method | Type | Best for |
-|--------|------|----------|
-| `'RK45'` | Explicit | Advection-dominated, 1D diffusion, default |
-| `'RK23'` | Explicit | Quick exploratory runs |
-| `'BDF'` | Implicit | 2D diffusion, stiff reaction-diffusion |
-| `'Radau'` | Implicit | Very stiff systems, higher accuracy than BDF |
-| `'DOP853'` | Explicit | Smooth non-stiff problems, high accuracy |
+Pass `method=` to `solve()` or `PDESystem.solve()`. These are forwarded directly
+to `scipy.integrate.solve_ivp`.
+
+| Problem type | Recommended method |
+|---|---|
+| Advection-dominated, smooth 1D | `'RK45'` |
+| Diffusion-dominated, stiff | `'BDF'` |
+| Stiff reaction-diffusion (Gray-Scott, FitzHugh-Nagumo) | `'BDF'` |
+| High accuracy needed | `'Radau'` |
+| NS cylinder Re ~ 100 | `'RK45'` |
+
+Tight tolerances are required to resolve diffusion accurately:
+`rtol=1e-8, atol=1e-10` is a safe starting point.
+
+---
+
+### Steady-State Problems
+
+`solve_steady()` finds φ such that RHS(φ) = 0 by delegating to
+`scipy.optimize.root`. Linear and nonlinear problems are handled identically —
+Newton converges in a single iteration for linear systems, so there is no
+performance penalty for always using the nonlinear path.
+
+#### Single equation
 
 ```python
-sol = PDESystem([eq]).solve(
-    t_span  = (0, 1),
-    method  = 'BDF',
-    rtol    = 1e-4,
-    atol    = 1e-6,
-    t_eval  = np.linspace(0, 1, 50),
+eq = PDE('T', x=x)
+eq.add_diffusion(diffusivity=1.0)
+eq.set_bc(side='left',  kind='dirichlet', value=1.0)
+eq.set_bc(side='right', kind='dirichlet', value=0.0)
+
+sol = eq.solve_steady()            # linear — zero guess is fine
+sol = eq.solve_steady(             # nonlinear — provide a starting guess
+    guess=np.linspace(1.0, 0.0, nx)
 )
 ```
+
+#### Coupled system
+
+```python
+sol = PDESystem([eqA, eqB, eqC]).solve_steady(
+    guess={'cA': np.linspace(5, 0, nx),
+           'cB': np.linspace(0, 5, nx),
+           'cC': np.zeros(nx)},
+)
+# sol.cA, sol.cB, sol.cC  — each shape (nx,)
+```
+
+#### Parameters
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `guess` | `None` → zeros | Array, scalar, or dict of arrays per field |
+| `method` | `'hybr'` | Any `scipy.optimize.root` method: `'hybr'`, `'lm'`, `'krylov'`, … |
+| `**kwargs` | — | Forwarded to `scipy.optimize.root` (e.g. `tol`, `options`) |
+
+#### Checking convergence
+
+```python
+sol = eq.solve_steady()
+print(sol.residual)   # max|RHS(φ)| — should be < 1e-8 for a good solution
+print(sol.nfev)       # number of RHS evaluations
+```
+
+Use `sol.residual` rather than `sol.success` as the primary convergence check —
+see the note in [SteadySolution](#steadysolution).
 
 ---
 
 ## Pre-built Equations
 
-`equations.py` provides factory functions for common PDE families.
-All factories return plain `PDE` objects (or `NamedPDESystem` for multi-field systems)
-so the full API remains available after construction.
+All factories return configured `PDE` or `NamedPDESystem` objects. The caller sets
+boundary conditions, initial conditions (transient only), and calls `solve()` or
+`solve_steady()`.
 
-```python
-from upde import (HeatEquation, AdvectionDiffusion, Burgers,
-                  ConservationLaw, ReactionDiffusion,
-                  WaveEquation, GrayScott, NavierStokes2D,
-                  MixtureFraction)
+### Single-field factories (return `PDE`)
+
+All support 1D and 2D (pass `y=` for 2D), and both `solve()` and `solve_steady()`.
+
+#### HeatEquation
+
+```
+∂T/∂t = ∇·(D ∇T)
 ```
 
-**1D vs 2D:** all single-field factories support both 1D and 2D — pass `y` to activate
-2D mode. `Burgers` is 1D only. `WaveEquation`, `GrayScott`, and `NavierStokes2D`
-require `y` (2D only).
-
-**Direct solve:** single-field equations that reference no external fields can be
-solved without constructing a `PDESystem`:
-
 ```python
-sol = eq.solve(t_span=(0, 1), method='BDF')
-```
-
-If the equation references an external field, `solve()` raises a `ValueError` with a
-clear message directing you to use `PDESystem`.
-
----
-
-### HeatEquation
-
-$$\frac{\partial T}{\partial t} = \nabla \cdot (D\,\nabla T)$$
-
-```python
-HeatEquation(field, x, y=None, diffusivity=1.0)
-```
-
-| Parameter | Description |
-|-----------|-------------|
-| `field` | Field name string |
-| `x` | 1D coordinate array |
-| `y` | 1D coordinate array (activates 2D mode) |
-| `diffusivity` | $D$ — scalar, array, or callable; may depend on space or the field |
-
-```python
-# 1D rod: T=1 on left, T=0 on right
+from upde import HeatEquation
 eq = HeatEquation('T', x=x, diffusivity=0.01)
-eq.set_bc(side='left',  kind='dirichlet', value=1.0)
-eq.set_bc(side='right', kind='dirichlet', value=0.0)
-eq.set_ic(0.0)
-sol = eq.solve(t_span=(0, 1), method='BDF')
+```
 
-# 2D with spatially varying diffusivity
-eq2 = HeatEquation('T', x=x, y=y, diffusivity=lambda x, y: 1 + x)
+#### AdvectionDiffusion
+
+```
+∂φ/∂t + c·∇φ = ∇·(D ∇φ)
+```
+
+```python
+from upde import AdvectionDiffusion
+eq = AdvectionDiffusion('phi', x=x, velocity=1.0, diffusivity=0.01)
+# 2D
+eq = AdvectionDiffusion('phi', x=x, y=y, velocity_x=1.0, velocity_y=0.5, diffusivity=0.01)
+```
+
+#### Burgers
+
+```
+∂u/∂t + ∂(u²/2)/∂x = ν ∂²u/∂x²
+```
+
+```python
+from upde import Burgers
+eq = Burgers('u', x=x, viscosity=0.01)   # 1D only
+```
+
+#### ConservationLaw
+
+```
+∂u/∂t + ∂F(u)/∂x = 0
+```
+
+```python
+from upde import ConservationLaw
+eq = ConservationLaw('u', x=x, flux=lambda u: 0.5 * u**2)
+```
+
+#### ReactionDiffusion
+
+```
+∂u/∂t = ∇·(D ∇u) + R(u, ...)
+```
+
+```python
+from upde import ReactionDiffusion
+eq = ReactionDiffusion('u', x=x, diffusivity=0.01, reaction=lambda x, u: -u * (1 - u))
+```
+
+#### MixtureFraction
+
+```
+∂Z/∂t + u·∇Z = ∇·(D ∇Z)
+```
+
+```python
+from upde import MixtureFraction
+eq = MixtureFraction('Z', x=x, velocity=0.1, diffusivity=1e-4)
 ```
 
 ---
 
-### AdvectionDiffusion
+### Multi-field factories (return `NamedPDESystem`)
 
-$$\frac{\partial T}{\partial t} + c\,\frac{\partial T}{\partial x}
-= \nabla \cdot (D\,\nabla T)$$
+These expose each equation as a named attribute for convenient BC/IC setup.
 
-```python
-AdvectionDiffusion(field, x, y=None,
-                   velocity=None, velocity_x=None, velocity_y=None,
-                   diffusivity=0.0,
-                   diffusivity_x=None, diffusivity_y=None)
+#### WaveEquation
+
+```
+∂²u/∂t² = c² ∇²u     [split: ∂u/∂t = uₜ,  ∂uₜ/∂t = c² ∇²u]
 ```
 
-Advection uses the convective form with first-order upwinding on `sign(c)`.
-Diffusion is conservative central.
-All coefficients may be scalars, arrays, callables, or string field names
-(for coupling to a velocity field from another equation).
-
 ```python
-# 1D — scalar transport with constant velocity
-eq = AdvectionDiffusion('T', x=x, velocity=1.0, diffusivity=0.005)
-eq.set_bc(kind='periodic')
-eq.set_ic(np.exp(-((x - 0.3)**2) / 0.01))
-sol = eq.solve(t_span=(0, 1), method='RK45')
-
-# 2D — passive scalar advected by a velocity field from another equation
-eq_T = AdvectionDiffusion('T', x=x, y=y,
-                           velocity_x='u', velocity_y='v',
-                           diffusivity=0.001)
-# eq_T.solve() would raise ValueError here — it references 'u' and 'v'
-# Must use PDESystem([eq_u, eq_v, eq_T]).solve(...)
+from upde import WaveEquation
+ns = WaveEquation('u', 'ut', x=x, speed=1.0)
+ns.u.set_bc(kind='periodic')
+ns.ut.set_bc(kind='periodic')
+ns.u.set_ic(np.sin(2 * np.pi * x))
+ns.ut.set_ic(np.zeros_like(x))
+sol = ns.solve((0, 2.0))
+# sol.u, sol.ut
 ```
 
----
+#### GrayScott
 
-### Burgers
-
-$$\frac{\partial u}{\partial t} + \frac{\partial}{\partial x}\!\left(\frac{u^2}{2}\right)
-= \nu\,\frac{\partial^2 u}{\partial x^2}$$
-
-```python
-Burgers(field, x, viscosity=0.0)
+```
+∂u/∂t = Dᵤ ∇²u − uv² + F(1−u)
+∂v/∂t = D_v ∇²v + uv² − (F+k)v
 ```
 
-Written in conservation form with flux $F(u) = u^2/2$.
-Wave speed $a = u$ is inferred automatically; upwinding on `sign(a)`.
-Set `viscosity=0` for the inviscid case (shock forms in finite time).
-**1D only.**
-
 ```python
-x = np.linspace(0, 2*np.pi, 512)
-
-# Viscous — shock is regularised
-eq = Burgers('u', x=x, viscosity=0.05)
-eq.set_bc(kind='periodic')
-eq.set_ic(np.sin(x))
-sol = eq.solve(t_span=(0, 3), method='RK45')
-
-# Inviscid — wave steepens to a shock
-eq_inv = Burgers('u', x=x, viscosity=0.0)
-eq_inv.set_bc(kind='periodic')
-eq_inv.set_ic(np.sin(x))
-sol_inv = eq_inv.solve(t_span=(0, 1), method='RK45')
+from upde import GrayScott
+gs = GrayScott('u', 'v', x=x, y=y, Du=2e-5, Dv=1e-5, F=0.04, k=0.06)
+gs.u.set_bc(kind='periodic', side='all')
+gs.v.set_bc(kind='periodic', side='all')
+gs.u.set_ic(1.0)
+gs.v.set_ic(lambda x, y: np.where((x-0.5)**2 + (y-0.5)**2 < 0.01, 0.25, 0.0))
+sol = gs.solve((0, 5000), method='BDF')
 ```
 
----
+#### NavierStokes2D
 
-### ConservationLaw
+2D incompressible Navier-Stokes via artificial compressibility (Chorin 1967):
 
-$$\frac{\partial u}{\partial t} + \frac{\partial F(u)}{\partial x} = 0$$
-
-```python
-ConservationLaw(field, x, flux, flux_y=None, scheme='upwind')
+```
+∂u/∂t = −u·∇u − (1/ρ) ∂p/∂x + ν ∇²u
+∂v/∂t = −u·∇v − (1/ρ) ∂p/∂y + ν ∇²v
+∂p/∂t = −β ∇·u
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `flux` | Callable $F(u)$ — 1D flux, or x-direction flux in 2D |
-| `flux_y` | Callable $G(u)$ — y-direction flux (2D only) |
-| `scheme` | `'upwind'` (default) or `'central'` |
-
-The wave speed $a = dF/du$ is inferred automatically via finite difference
-and used to select the upwind direction.
-
 ```python
-# LWR traffic flow: F(ρ) = ρ(1−ρ), wave speed a = 1−2ρ
-eq = ConservationLaw('rho', x=x, flux=lambda rho: rho * (1 - rho))
-eq.set_bc(kind='periodic')
-eq.set_ic(0.2 + 0.6 * np.exp(-((x - 0.3)**2) / 0.005))
-sol = eq.solve(t_span=(0, 0.5), method='RK45')
-
-# Buckley-Leverett (two-phase flow)
-eq2 = ConservationLaw('s', x=x,
-                       flux=lambda s: s**2 / (s**2 + (1 - s)**2))
+from upde import NavierStokes2D
+ns = NavierStokes2D('u', 'v', 'p', x=x, y=y, nu=0.01, rho=1.0, beta=10.0)
+# Set BCs on ns.u, ns.v, ns.p ...
+sol = ns.solve((0, 10.0), method='RK45')
+# sol.u, sol.v, sol.p  each shape (nx, ny, nt)
 ```
 
----
-
-### ReactionDiffusion
-
-$$\frac{\partial u}{\partial t} = \nabla \cdot (D\,\nabla u) + R(u,\,x,\,\ldots)$$
-
-```python
-ReactionDiffusion(field, x, y=None, diffusivity=1.0, reaction=None)
-```
-
-The reaction callable `R` may reference other coupled fields by name,
-enabling multi-species systems to be built by combining multiple instances.
-
-```python
-# Fisher-KPP travelling wave
-r  = 1.0; D = 0.5
-eq = ReactionDiffusion('u', x=x, diffusivity=D,
-                        reaction=lambda x, u: r * u * (1 - u))
-eq.set_bc(side='left',  kind='dirichlet', value=1.0)
-eq.set_bc(side='right', kind='dirichlet', value=0.0)
-eq.set_ic(lambda x: (x < 1.0).astype(float))
-sol = eq.solve(t_span=(0, 20), method='BDF')
-# Theoretical wave speed: c* = 2*sqrt(r*D)
-
-# FitzHugh-Nagumo (two coupled species)
-eps, beta, gamma = 0.1, 0.5, 1.0
-eq_v = ReactionDiffusion('v', x=x, diffusivity=1.0,
-                          reaction=lambda x, v, w: v - v**3/3 - w)
-eq_w = ReactionDiffusion('w', x=x, diffusivity=0.0,
-                          reaction=lambda x, v, w: eps*(v - beta*w + gamma))
-sol = PDESystem([eq_v, eq_w]).solve(t_span=(0, 100), method='BDF')
-```
-
----
-
-### WaveEquation
-
-$$\frac{\partial^2 u}{\partial t^2} = c^2\,\nabla^2 u$$
-
-Split into a first-order system:
-
-$$\frac{\partial u}{\partial t} = u_t \qquad
-\frac{\partial u_t}{\partial t} = c^2\,\nabla^2 u$$
-
-```python
-WaveEquation(u_name, ut_name, x, y=None, speed=1.0)
-```
-
-Returns a `NamedPDESystem` with attributes named after the two fields.
-BCs and ICs must be set on both fields.
-
-```python
-wave = WaveEquation('u', 'ut', x=x, speed=1.0)
-
-wave.u.set_bc(side='left',  kind='dirichlet', value=0.0)
-wave.u.set_bc(side='right', kind='dirichlet', value=0.0)
-wave.ut.set_bc(side='left',  kind='dirichlet', value=0.0)
-wave.ut.set_bc(side='right', kind='dirichlet', value=0.0)
-
-wave.u.set_ic(lambda x: np.sin(np.pi * x))   # plucked string
-wave.ut.set_ic(0.0)                            # released from rest
-
-sol = wave.solve(t_span=(0, 2), method='RK45')
-# Analytical solution: u(x,t) = cos(π c t) sin(π x)
-```
-
----
-
-### GrayScott
-
-$$\frac{\partial u}{\partial t} = D_u\,\nabla^2 u - uv^2 + F(1-u)$$
-$$\frac{\partial v}{\partial t} = D_v\,\nabla^2 v + uv^2 - (F+k)v$$
-
-```python
-GrayScott(u_name, v_name, x, y=None,
-          Du=2e-5, Dv=1e-5, F=0.04, k=0.06)
-```
-
-Returns a `NamedPDESystem`. The autocatalytic $uv^2$ term drives Turing-type
-pattern formation. Pattern type depends on $F$ and $k$:
-
-| Pattern | $F$ | $k$ |
-|---------|-----|-----|
-| Spots | 0.035 | 0.065 |
-| Stripes | 0.040 | 0.060 |
-| Solitons | 0.025 | 0.055 |
-| Chaos | 0.026 | 0.051 |
-
-```python
-gs = GrayScott('u', 'v', x=x, y=y, Du=2e-5, Dv=1e-5, F=0.035, k=0.065)
-gs.u.set_bc(kind='periodic')
-gs.v.set_bc(kind='periodic')
-
-u0 = np.ones((nx, ny));   v0 = np.zeros((nx, ny))
-cx, cy = nx//2, ny//2;    r = nx//10
-u0[cx-r:cx+r, cy-r:cy+r] = 0.5
-v0[cx-r:cx+r, cy-r:cy+r] = 0.25
-
-gs.u.set_ic(u0);  gs.v.set_ic(v0)
-sol = gs.solve(t_span=(0, 3000), method='BDF', rtol=1e-4, atol=1e-6)
-# sol.u, sol.v — shape (nx, ny, nt)
-```
-
-> **Solver note:** Gray-Scott is stiff. Always use `method='BDF'` or `'Radau'`.
-> Pattern formation requires long integration times (t ~ 1000–5000).
-
----
-
-### NavierStokes2D
-
-$$\frac{\partial u}{\partial t} + u\frac{\partial u}{\partial x} + v\frac{\partial u}{\partial y}
-= -\frac{1}{\rho}\frac{\partial p}{\partial x} + \nu\nabla^2 u$$
-
-$$\frac{\partial v}{\partial t} + u\frac{\partial v}{\partial x} + v\frac{\partial v}{\partial y}
-= -\frac{1}{\rho}\frac{\partial p}{\partial y} + \nu\nabla^2 v$$
-
-$$\frac{\partial p}{\partial t} = -\beta\!\left(\frac{\partial u}{\partial x}
-+ \frac{\partial v}{\partial y}\right) + \varepsilon\,\nabla^2 p$$
-
-```python
-NavierStokes2D(u_name, v_name, p_name, x, y,
-               nu=0.01, rho=1.0, beta=0.5,
-               pressure_stabilisation=None)
-```
-
-| Parameter | Description |
-|-----------|-------------|
-| `nu` | Kinematic viscosity |
-| `rho` | Density |
-| `beta` | Artificial compressibility parameter. Larger → tighter divergence constraint but stiffer system |
-| `pressure_stabilisation` | $\varepsilon$ for $\varepsilon\nabla^2 p$ term. Default `None` sets $\varepsilon = 0.5\Delta x^2$ automatically to suppress checkerboard oscillations. Set to `0.0` to disable |
-
-Returns a `NamedPDESystem` with attributes named after the three fields.
-BCs and ICs must be set on all three fields.
-
-**Field names are user-supplied** — pass whatever names you want:
-
-```python
-ns = NavierStokes2D('u', 'v', 'p', x=x, y=y, nu=0.01)
-# or
-ns = NavierStokes2D('vx', 'vy', 'pressure', x=x, y=y, nu=0.01)
-```
-
-**Typical BC pattern:**
-
-```python
-ns = NavierStokes2D('u', 'v', 'p', x=x, y=y, nu=0.01, rho=1.0, beta=0.5)
-
-# u: inflow left, outflow right, no-slip top/bottom
-ns.u.set_bc(side='left',   kind='dirichlet', value=U_in)
-ns.u.set_bc(side='right',  kind='neumann',   value=0.0)
-ns.u.set_bc(side='bottom', kind='dirichlet', value=0.0)
-ns.u.set_bc(side='top',    kind='dirichlet', value=0.0)
-
-# v: no-slip / outflow
-ns.v.set_bc(side='left',   kind='dirichlet', value=0.0)
-ns.v.set_bc(side='right',  kind='neumann',   value=0.0)
-ns.v.set_bc(side='bottom', kind='dirichlet', value=0.0)
-ns.v.set_bc(side='top',    kind='dirichlet', value=0.0)
-
-# p: Neumann everywhere
-for side in ('left', 'right', 'bottom', 'top'):
-    ns.p.set_bc(side=side, kind='neumann', value=0.0)
-
-# ICs
-ns.u.set_ic(U_in);  ns.v.set_ic(0.0);  ns.p.set_ic(0.0)
-
-sol = ns.solve(t_span=(0, 60), method='RK45', rtol=1e-4, atol=1e-6)
-```
-
-**Cylinder obstacle:**
-
-```python
-cyl = (X - cx)**2 + (Y - cy)**2 < radius**2
-ns.u.set_interior_bc(cyl, kind='dirichlet', value=0.0)
-ns.v.set_interior_bc(cyl, kind='dirichlet', value=0.0)
-ns.p.set_interior_bc(cyl, kind='neumann')
-```
-
-> **Important:** The artificial compressibility method is not divergence-free.
-> The residual $\nabla\cdot\mathbf{u} = O(1/\beta)$ is expected behaviour, not a bug.
-> For tighter incompressibility, increase $\beta$ (at the cost of stiffness).
-
----
-
-### MixtureFraction
-
-$$\frac{\partial Z}{\partial t} + \mathbf{u}\cdot\nabla Z = \nabla\cdot(D\,\nabla Z)$$
-
-```python
-MixtureFraction(field, x, y=None,
-                velocity=None, velocity_x=None, velocity_y=None,
-                diffusivity=1e-4)
-```
-
-Mixture-fraction transport for flamelet-based non-premixed combustion.
-$Z \in [0,1]$ is a conserved scalar: $Z=0$ is pure oxidiser, $Z=1$ is pure fuel.
-No chemical source term appears — the stiff combustion chemistry is entirely
-pre-tabulated in a `FlameletTable` and evaluated after the solve.
-
-This is a named wrapper around `AdvectionDiffusion` with a combustion-appropriate
-default diffusivity ($D = 10^{-4}$ m²/s, the thermal diffusivity of air at 300 K).
-
-```python
-from upde import MixtureFraction, PDESystem
-from upde.chemistry import FlameletTable
-
-x     = np.linspace(0, 1, 256)
-table = FlameletTable.burke_schumann()
-
-eq = MixtureFraction('Z', x=x, diffusivity=1e-4)
-eq.set_bc(side='left',  kind='dirichlet', value=0.0)   # oxidiser
-eq.set_bc(side='right', kind='dirichlet', value=1.0)   # fuel
-eq.set_ic(lambda x: x)
-
-sol = PDESystem([eq]).solve(t_span=(0, 5000), method='BDF')
-
-# Reconstruct thermochemistry from the flamelet table
-T_field = table.T(sol.Z[:, -1])          # temperature [K]
-Y_CH4   = table.Y('CH4', sol.Z[:, -1])   # fuel mass fraction
-```
-
-Couple to a velocity field from `NavierStokes2D` by passing string references:
-
-```python
-zz = MixtureFraction('Z', x=x, y=y,
-                     velocity_x='u', velocity_y='v',
-                     diffusivity=1e-4)
-sol = PDESystem([ns.u_eq, ns.v_eq, ns.p_eq, zz]).solve(...)
-```
-
-> **Solver note:** use `method='BDF'` for diffusion-dominated problems.
-> Advection-dominated jets at moderate Péclet number can use `'RK45'`.
+`pressure_stabilisation` (default `None` → `0.5 Δx²`) suppresses checkerboard
+pressure oscillations on the collocated grid. Set to `0.0` to disable.
 
 ---
 
 ## Combustion and Flamelet Chemistry
 
-uPDE supports non-premixed combustion via the **mixture-fraction / flamelet approach**:
-the transport equation for $Z$ is solved by `solve_ivp` as a pure convection-diffusion
-problem (no stiff chemistry), and temperature and species are reconstructed afterward
-from a pre-integrated flamelet table.
-
-This completely avoids the extreme stiffness of full chemistry mechanisms — the
-`solve_ivp` integrator never sees chemical timescales.
+uPDE supports flamelet-based combustion modelling via mixture-fraction transport
+coupled to a precomputed chemistry table. This approach avoids the extreme stiffness
+of full chemistry by decoupling the transport solve from the thermochemistry lookup.
 
 ### FlameletTable
 
@@ -804,30 +632,25 @@ This completely avoids the extreme stiffness of full chemistry mechanisms — th
 from upde.chemistry import FlameletTable
 ```
 
-Maps $Z \in [0,1]$ to temperature and species mass fractions via `numpy.interp`.
+Maps Z ∈ [0, 1] to temperature and species mass fractions via `numpy.interp`.
 
 #### Construction
 
 ```python
-# 1. Analytic Burke-Schumann (no dependencies — good for education and testing)
+# Analytic Burke-Schumann (no dependencies — good for testing)
 table = FlameletTable.burke_schumann(
-    Z_st=0.055,     # stoichiometric mixture fraction (CH4/air default)
-    T_fuel=300.0,   # fuel-stream temperature [K]
-    T_ox=300.0,     # oxidiser-stream temperature [K]
-    T_ad=2230.0,    # adiabatic flame temperature [K]
+    Z_st=0.055, T_fuel=300.0, T_ox=300.0, T_ad=2230.0
 )
 
-# 2. Load a previously saved table (no Cantera at solve time)
+# Load a previously saved table
 table = FlameletTable.from_file('ch4_air.npz')
 
-# 3. From raw arrays (user-supplied data)
+# From raw arrays
 table = FlameletTable(Z_grid, T, species={'CH4': Y_CH4, 'O2': Y_O2, ...})
 
-# 4. From Cantera counterflow flame (requires pip install cantera)
+# From a Cantera counterflow flame (requires pip install cantera)
 table = FlameletTable.from_cantera(
-    mechanism='gri30.yaml',
-    fuel='CH4',
-    oxidizer='O2:0.21,N2:0.79',
+    mechanism='gri30.yaml', fuel='CH4', oxidizer='O2:0.21,N2:0.79',
     T_fuel=300.0, T_ox=300.0,
 )
 table.save('ch4_air_gri30.npz')
@@ -835,25 +658,16 @@ table.save('ch4_air_gri30.npz')
 
 #### Accessors
 
-All accessors accept any numpy array shape. $Z$ is automatically clipped to $[0,1]$.
-
 ```python
 T_field   = table.T(Z)                   # temperature [K]
 Y_CH4     = table.Y('CH4', Z)            # species mass fraction
-rho_field = table.rho(Z, P=101325.0)     # density [kg/m³] from ideal gas law
+rho_field = table.rho(Z, P=101325.0)     # density [kg/m³]
 
 print(table.species)   # ['CH4', 'O2', 'CO2', 'H2O', 'N2']
-print(table.Z_st)      # stoichiometric mixture fraction (location of peak T)
+print(table.Z_st)      # stoichiometric mixture fraction
 ```
 
-#### Serialisation
-
-```python
-table.save('ch4_air.npz')
-table = FlameletTable.from_file('ch4_air.npz')
-```
-
----
+All accessors accept any NumPy array shape. Z is clipped to [0, 1] automatically.
 
 ### Workflow
 
@@ -862,57 +676,24 @@ import numpy as np
 from upde import MixtureFraction, PDESystem
 from upde.chemistry import FlameletTable
 
-# Step 1 — build the chemistry table (once)
 table = FlameletTable.burke_schumann()
 
-# Step 2 — set up Z transport
 x  = np.linspace(0, 1, 256)
 eq = MixtureFraction('Z', x=x, diffusivity=1e-4)
 eq.set_bc(side='left',  kind='dirichlet', value=0.0)
 eq.set_bc(side='right', kind='dirichlet', value=1.0)
 eq.set_ic(0.0)
 
-# Step 3 — solve (no stiff chemistry in the ODE!)
-sol = PDESystem([eq]).solve(t_span=(0, 5000), method='BDF',
-                             rtol=1e-6, atol=1e-8)
+sol = PDESystem([eq]).solve(t_span=(0, 5000), method='BDF', rtol=1e-6, atol=1e-8)
 
-# Step 4 — reconstruct thermochemistry (instant — just numpy.interp)
 Z_final = sol.Z[:, -1]
 T       = table.T(Z_final)
 Y_CH4   = table.Y('CH4', Z_final)
-rho     = table.rho(Z_final)
 
-x_flame = x[np.argmax(T)]
-print(f'Flame location: x = {x_flame:.4f}  (Z_st = {table.Z_st:.4f})')
+print(f'Flame at x = {x[np.argmax(T)]:.4f}  (Z_st = {table.Z_st:.4f})')
 ```
 
 ---
-
-### Using Cantera
-
-`FlameletTable.from_cantera()` requires `pip install cantera`. It runs a 1-D
-counterflow diffusion flame, extracts $Z$–$T$–$Y_k$ profiles via Bilger's
-definition, and returns a ready-to-use `FlameletTable`. Save the result so
-Cantera is only needed once:
-
-```python
-# Run once (needs Cantera)
-table = FlameletTable.from_cantera(
-    mechanism='gri30.yaml',
-    fuel='CH4',
-    oxidizer='O2:0.21,N2:0.79',
-)
-table.save('ch4_air_gri30.npz')
-
-# All subsequent runs — no Cantera needed
-table = FlameletTable.from_file('ch4_air_gri30.npz')
-```
-
-If Cantera is not installed, a helpful `ImportError` is raised. Use
-`FlameletTable.burke_schumann()` as a self-contained alternative.
-
----
-
 
 ## API Reference
 
@@ -929,13 +710,15 @@ PDE(field, x, y=None)
 | `add_diffusion(diffusivity=)` | Isotropic diffusion $\nabla\cdot(D\nabla\phi)$ |
 | `add_diffusion(diffusivity_x=, diffusivity_y=)` | Anisotropic diffusion |
 | `add_source(expr=)` | Pointwise source $S(x[,y], \texttt{**fields})$ |
-| `add_flux(flux=, scheme=)` | 1D conservation law $-\partial_x F(\phi)$, wave speed inferred |
+| `add_flux(flux=, scheme=)` | 1D conservation law $-\partial_x F(\phi)$ |
 | `add_flux(flux_x=, flux_y=, scheme=)` | 2D conservation law |
 | `add_term(fn)` | Generic operator term — see [Operator Reference](#operator-reference) |
 | `set_bc(kind, side=, mask=, value=)` | Domain boundary condition |
 | `set_interior_bc(mask, kind, value=)` | Interior obstacle BC |
 | `set_ic(ic)` | Initial condition: scalar, array, or callable |
-| `solve(t_span, **kwargs)` | Solve directly (uncoupled equations only) |
+| `solve(t_span, **kwargs)` | Transient solve (uncoupled equations only) |
+| `solve_steady(guess=None, method='hybr', **kwargs)` | Steady-state solve (uncoupled only) |
+| `field_refs()` | Set of external field names referenced by this equation |
 
 ---
 
@@ -943,46 +726,62 @@ PDE(field, x, y=None)
 
 ```python
 PDESystem(equations)
-sol = PDESystem([eq1, eq2, ...]).solve(t_span, ICs=None, method='RK45',
-                                       t_eval=None, **kwargs)
 ```
 
-Validates all field references at construction time.
-`**kwargs` are forwarded to `scipy.integrate.solve_ivp`.
+Validates field references at construction time.
+
+| Method | Description |
+|--------|-------------|
+| `solve(t_span, ICs=None, method='RK45', t_eval=None, **kwargs)` | Transient solve via `solve_ivp` |
+| `solve_steady(guess=None, method='hybr', **kwargs)` | Steady-state solve via `root` |
+
+`**kwargs` are forwarded to the underlying SciPy solver.
 
 ---
 
 ### PDESolution
 
-| Attribute | Description |
-|-----------|-------------|
-| `sol.<field>` | Field array — shape `(nx, nt)` in 1D, `(nx, ny, nt)` in 2D |
-| `sol.t` | Time points `(nt,)` |
-| `sol.success` | `True` if the integrator reached `t_span[1]` |
-| `sol.message` | Integrator status string |
-| `sol.raw` | Raw `scipy.OdeResult` |
+Returned by `solve()`.
+
+| Attribute | Shape | Description |
+|-----------|-------|-------------|
+| `sol.<field>` | `(nx, nt)` or `(nx, ny, nt)` | Field values, spatial indices first |
+| `sol.t` | `(nt,)` | Time points |
+| `sol.success` | bool | `True` if integrator reached `t_span[1]` |
+| `sol.message` | str | Integrator status |
+| `sol.raw` | `OdeResult` | Raw SciPy result |
+
+---
+
+### SteadySolution
+
+Returned by `solve_steady()`.
+
+| Attribute | Shape | Description |
+|-----------|-------|-------------|
+| `sol.<field>` | `(nx,)` or `(nx, ny)` | Field values — no time dimension |
+| `sol.residual` | float | max\|RHS(φ)\| at solution — primary convergence indicator |
+| `sol.success` | bool | Convergence flag from `root` (see note above) |
+| `sol.message` | str | Convergence message |
+| `sol.nfev` | int | Number of RHS evaluations |
+| `sol.raw` | `OptimizeResult` | Raw SciPy result |
 
 ---
 
 ### Operator Reference
 
 Operators are injected into `add_term` functions by **name matching** — the order of
-arguments does not matter. Any parameter whose name matches an operator or a declared
-field is automatically injected; the rest are ignored.
+arguments does not matter:
 
 ```python
-# All equivalent — order doesn't matter, only names do
-def my_rhs(u, Dx, Dxx):       ...
-def my_rhs(Dxx, Dx, u):       ...
-def my_rhs(Dx, u, Dxx):       ...
+def my_rhs(u, Dx, Dxx):   ...   # order is irrelevant — only names matter
+def my_rhs(Dxx, u, Dx):   ...   # equivalent
 
 # Use **fields to receive all coupled fields at once
 def my_rhs(Dx, Dy, **fields):
-    u = fields['u'];  v = fields['v']
+    u, v = fields['u'], fields['v']
     ...
 ```
-
-#### Available operators
 
 | Name | Expression | Notes |
 |------|-----------|-------|
@@ -997,7 +796,7 @@ def my_rhs(Dx, Dy, **fields):
 | `Div_flux_x(k, phi)` | $\partial(k\,\partial\phi/\partial x)/\partial x$ | Diffusive flux |
 | `Div_flux_y(k, phi)` | $\partial(k\,\partial\phi/\partial y)/\partial y$ | 2D only |
 
-> **Rule:** never nest operators — use `Dxx(phi)` not `Dx(Dx(phi))`.
+> **Rule:** never nest operators — use `Dxx(phi)`, not `Dx(Dx(phi))`.
 
 ---
 
@@ -1012,35 +811,41 @@ def my_rhs(Dx, Dy, **fields):
 | `Dx`, `Dy` | Central difference | 2nd in space |
 | `Dxx`, `Dyy` | Central difference | 2nd in space |
 | `Div_x`, `Div_y` | Central conservative | 2nd in space |
-| Time integration | `solve_ivp` adaptive | depends on method |
+| Transient time integration | `solve_ivp` adaptive | depends on method |
+| Steady-state solve | Newton via `scipy.optimize.root` | — |
 
-All spatial operators are BC-aware — ghost cells are constructed from the boundary
-conditions before each stencil application.
+All spatial operators are BC-aware — ghost cells are padded from the boundary
+conditions before each stencil application, preventing periodic wrap-around
+from silently corrupting non-periodic boundaries.
 
 ---
 
 ## Troubleshooting
 
-**Solver fails or takes tiny steps**
+**Transient solver fails or takes tiny steps**
 - Switch to `method='BDF'` for diffusion-dominated or stiff problems
 - Loosen tolerances: `rtol=1e-3, atol=1e-5`
 - Check that BCs are consistent with the IC at `t=0`
 
-**Solution blows up**
+**Solution blows up (transient)**
 - Add or increase diffusivity to stabilise advection
-- Reduce `beta` in NavierStokes2D if the pressure equation is causing instability
-- Check that source terms don't have the wrong sign
+- Reduce `beta` in NavierStokes2D if the pressure equation is oscillating
+- Check that source terms have the correct sign
 
 **Checkerboard oscillations in pressure (NavierStokes2D)**
-- The default `pressure_stabilisation=None` sets $\varepsilon = 0.5\Delta x^2$ automatically
+- The default `pressure_stabilisation=None` sets ε = 0.5 Δx² automatically
 - If oscillations persist, increase it: `pressure_stabilisation=dx**2`
-- Do not set it so large that the physical pressure gradient is smoothed away
+
+**Steady-state solver doesn't converge**
+- Check `sol.residual` — if it's small (< 1e-6) the solution is likely correct despite `sol.success=False`
+- For nonlinear problems, provide a better `guess` (e.g. linear interpolation between BCs)
+- Try a different method: `solve_steady(method='lm')` or `solve_steady(method='krylov')`
+- For large 2D problems, pass `options={'maxfev': 10000}` to increase the iteration limit
 
 **`ValueError: references external field(s)`**
-- `PDE.solve()` only works for uncoupled equations
-- Use `PDESystem([eq1, eq2, ...]).solve(...)` for coupled problems
+- `PDE.solve()` and `PDE.solve_steady()` only work for uncoupled equations
+- Use `PDESystem([eq1, eq2, ...]).solve(...)` or `.solve_steady(...)` for coupled problems
 
 **Field not found in solution**
-- Check the field name string passed to `PDE(field, ...)` matches what you access on `sol`
-- Field names are case-sensitive: `'T'` and `'t'` are different
+- Check the field name string matches exactly — names are case-sensitive
 - `'t'` is reserved for the solver time — `PDE('t', ...)` raises `ValueError`

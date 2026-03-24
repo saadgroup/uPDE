@@ -21,6 +21,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
+
+# Last modified: 2026-03-24 14:51 UTC
 """
 pde_solver.py
 =============
@@ -92,6 +94,7 @@ Example — 1D coupled reaction-diffusion
 import inspect
 import numpy as np
 from scipy.integrate import solve_ivp
+from scipy.optimize  import root
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +488,51 @@ class PDESolution:
         return (
             f"PDESolution(fields={self._fields}, shape={shape[:-1]}, nt={nt}, "
             f"t=[{self.t[0]:.3g}, {self.t[-1]:.3g}], success={self.success})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# SteadySolution — result of solve_steady()
+# ---------------------------------------------------------------------------
+
+class SteadySolution:
+    """
+    Result of PDESystem.solve_steady() or PDE.solve_steady().
+
+    Attributes
+    ----------
+    <field>  : (nx,) for 1D, (nx, ny) for 2D — steady-state field, by name
+    success  : bool   — did scipy.optimize.root converge?
+    message  : str    — convergence message
+    residual : float  — max|RHS(phi)| at the solution
+    nfev     : int    — number of RHS evaluations
+    raw      : scipy OptimizeResult
+    """
+
+    def __init__(self, opt_result, equations):
+        self.success  = bool(opt_result.success)
+        self.message  = opt_result.message
+        self.nfev     = int(opt_result.nfev)
+        self.raw      = opt_result
+        self._fields  = [eq.field for eq in equations]
+
+        offset = 0
+        for eq in equations:
+            chunk = opt_result.x[offset:offset + eq.n_total]
+            arr   = chunk.reshape(eq.nx, eq.ny) if eq.is_2d else chunk
+            setattr(self, eq.field, arr)
+            offset += eq.n_total
+
+        # residual: max|f(x)| at solution
+        self.residual = float(np.max(np.abs(opt_result.fun)))
+
+    def __repr__(self):
+        f0    = self._fields[0]
+        shape = getattr(self, f0).shape
+        return (
+            f"SteadySolution(fields={self._fields}, shape={shape}, "
+            f"success={self.success}, residual={self.residual:.2e}, "
+            f"nfev={self.nfev})"
         )
 
 
@@ -983,6 +1031,56 @@ class PDE:
             )
         return PDESystem([self]).solve(t_span, **kwargs)
 
+    def solve_steady(self, guess=None, method='hybr', **kwargs):
+        """
+        Solve for the steady state: RHS(phi) = 0.
+
+        Wraps scipy.optimize.root — treats all problems as nonlinear.
+        Linear systems converge in a single Newton iteration at no penalty.
+
+        Parameters
+        ----------
+        guess  : scalar | ndarray(nx,) | ndarray(nx,ny), optional
+                 Starting point for the iterative solver.  Defaults to zeros.
+                 For linear problems any guess works.  For nonlinear problems
+                 a reasonable guess (e.g. linearly interpolated BCs) helps.
+        method : str
+                 Method for scipy.optimize.root.  Default 'hybr'.
+                 Options: 'hybr', 'lm', 'broyden1', 'krylov', etc.
+        **kwargs
+                 Forwarded to scipy.optimize.root (tol, options, …).
+
+        Returns
+        -------
+        SteadySolution
+
+        Raises
+        ------
+        ValueError
+            If this equation references external fields — use
+            PDESystem([eq1, eq2]).solve_steady() instead.
+
+        Example
+        -------
+        eq = PDE('T', x=x)
+        eq.add_diffusion(diffusivity=1.0)
+        eq.set_bc(side='left',  kind='dirichlet', value=1.0)
+        eq.set_bc(side='right', kind='dirichlet', value=0.0)
+        sol = eq.solve_steady()   # sol.T  shape (nx,)
+        """
+        external_refs = self.field_refs() - {self.field}
+        if external_refs:
+            raise ValueError(
+                f"PDE('{self.field}') references external field(s) "
+                f"{sorted(external_refs)} and cannot be solved independently. "
+                f"Use PDESystem([...]).solve_steady() for coupled equations."
+            )
+        return PDESystem([self]).solve_steady(
+            guess={self.field: guess} if guess is not None else None,
+            method=method,
+            **kwargs,
+        )
+
     # ------------------------------------------------------------------
 
     def _side_to_mask(self, side):
@@ -1204,8 +1302,103 @@ class PDESystem:
         )
         return PDESolution(ivp, self.equations)
 
+    def solve_steady(self, guess=None, method='hybr', **kwargs):
+        """
+        Solve the coupled steady-state system: RHS(phi_1, phi_2, ...) = 0.
+
+        Uses scipy.optimize.root — linear systems converge in one iteration,
+        nonlinear systems iterate as needed.
+
+        Parameters
+        ----------
+        guess  : dict, optional
+                 {field_name: array | scalar} initial guess per field.
+                 Any unspecified field defaults to zeros.
+        method : str
+                 Method for scipy.optimize.root.  Default 'hybr'.
+        **kwargs
+                 Forwarded to scipy.optimize.root (tol, options, …).
+
+        Returns
+        -------
+        SteadySolution
+
+        Example — steady heat conduction
+        ---------------------------------
+        eq = PDE('T', x=x)
+        eq.add_diffusion(diffusivity=1.0)
+        eq.set_bc(side='left',  kind='dirichlet', value=1.0)
+        eq.set_bc(side='right', kind='dirichlet', value=0.0)
+        sol = PDESystem([eq]).solve_steady()
+        # sol.T  shape (nx,)
+
+        Example — coupled steady reaction-diffusion
+        --------------------------------------------
+        sol = PDESystem([eqA, eqB]).solve_steady(
+            guess={'cA': np.ones(nx)*5, 'cB': np.ones(nx)*5}
+        )
+        # sol.cA, sol.cB  each shape (nx,)
+        """
+        guess = dict(guess) if guess is not None else {}
+
+        # Build flat initial guess vector
+        y0_parts = []
+        for eq in self.equations:
+            g = guess.get(eq.field, None)
+            if g is None:
+                y0_parts.append(np.zeros(eq.n_total))
+            elif np.isscalar(g):
+                y0_parts.append(np.full(eq.n_total, float(g)))
+            else:
+                y0_parts.append(np.asarray(g, dtype=float).ravel())
+        y0 = np.concatenate(y0_parts)
+
+        opt = root(self._rhs_steady, y0, method=method, **kwargs)
+        return SteadySolution(opt, self.equations)
+
     # ------------------------------------------------------------------
-    # Internal: RHS for solve_ivp
+    # Internal: residual for solve_steady
+    # ------------------------------------------------------------------
+
+    def _rhs_steady(self, y):
+        """
+        Residual for scipy.optimize.root: R(y) = 0 at steady state.
+
+        Identical to _rhs(t=0, y) except that Dirichlet BC nodes use the
+        residual form  phi[mask] - value = 0  so the optimizer correctly
+        pins those degrees of freedom.
+        """
+        # Re-use transient _rhs machinery at t=0 to get stencil contributions
+        rhs_flat = self._rhs(0.0, y)
+
+        # Now fix up Dirichlet BC nodes: replace dvalue/dt=0 with phi-value=0
+        offset = 0
+        for eq in self.equations:
+            chunk = y[offset:offset + eq.n_total]
+            phi   = chunk.reshape(eq.nx, eq.ny) if eq.is_2d else chunk
+            rhs   = rhs_flat[offset:offset + eq.n_total].reshape(phi.shape)
+
+            # Domain-edge Dirichlet BCs
+            for bc in eq._bcs:
+                if bc.kind == 'dirichlet':
+                    val = bc.get_value(0.0)
+                    if val is None:
+                        val = 0.0
+                    rhs[bc.mask] = phi[bc.mask] - val
+
+            # Interior Dirichlet BCs (obstacles)
+            for ibc in eq._interior_bcs:
+                if ibc.kind == 'dirichlet':
+                    val = ibc.get_value(0.0)
+                    if val is None:
+                        val = 0.0
+                    rhs[ibc.mask] = phi[ibc.mask] - val
+
+            rhs_flat[offset:offset + eq.n_total] = rhs.ravel()
+            offset += eq.n_total
+
+        return rhs_flat
+
     # ------------------------------------------------------------------
 
     def _rhs(self, t, y):
