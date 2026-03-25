@@ -21,7 +21,7 @@ Tests
   steady_2d_laplace_exact         2D Laplace, T=1-x, machine precision
   steady_2d_poisson_exact         2D Poisson, sinusoidal source, O(dx^2) error
   steady_coupled_species_balance  A+B->C, Green's identity balance < 1e-2
-  steady_returns_steady_solution  return type is SteadySolution
+  steady_returns_steady_solution  return type is PDESteadySolution
   steady_1d_field_shape           1D field shape is (nx,) — no time dimension
   steady_2d_field_shape           2D field shape is (nx, ny) — no time dimension
   steady_raises_for_external_field  PDE.solve_steady raises for external field refs
@@ -31,7 +31,7 @@ Tests
 import numpy as np
 import pytest
 
-from upde import PDE, PDESystem, SteadySolution
+from upde import PDE, PDESystem, PDESteadySolution
 
 
 class TestSteadyPhysics:
@@ -229,7 +229,7 @@ class TestSteadyPhysics:
     # ------------------------------------------------------------------
 
     def test_steady_returns_steady_solution(self, grid_1d_32):
-        """solve_steady() must return a SteadySolution, not a PDESolution."""
+        """solve_steady() must return a PDESteadySolution, not a PDEUnsteadySolution."""
         x  = grid_1d_32
         eq = PDE('T', x=x)
         eq.add_diffusion(diffusivity=1.0)
@@ -237,7 +237,7 @@ class TestSteadyPhysics:
         eq.set_bc(side='right', kind='dirichlet', value=0.0)
 
         sol = eq.solve_steady()
-        assert isinstance(sol, SteadySolution)
+        assert isinstance(sol, PDESteadySolution)
 
     def test_steady_1d_field_shape(self, grid_1d_64):
         """1D steady field must have shape (nx,) — no time dimension."""

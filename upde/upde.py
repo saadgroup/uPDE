@@ -42,7 +42,7 @@ Dimensionality
     1D : numpy array of shape (nx,)
     2D : numpy array of shape (nx, ny)
 
-  PDESolution fields:
+  PDEUnsteadySolution fields:
     1D : (nx, nt)
     2D : (nx, ny, nt)   — spatial indices first, time last
 
@@ -447,7 +447,7 @@ class _InteriorBC:
 # Solution container
 # ---------------------------------------------------------------------------
 
-class PDESolution:
+class PDEUnsteadySolution:
     """
     Result of PDESystem.solve().
 
@@ -486,16 +486,16 @@ class PDESolution:
         shape = getattr(self, f0).shape
         nt    = len(self.t)
         return (
-            f"PDESolution(fields={self._fields}, shape={shape[:-1]}, nt={nt}, "
+            f"PDEUnsteadySolution(fields={self._fields}, shape={shape[:-1]}, nt={nt}, "
             f"t=[{self.t[0]:.3g}, {self.t[-1]:.3g}], success={self.success})"
         )
 
 
 # ---------------------------------------------------------------------------
-# SteadySolution — result of solve_steady()
+# PDESteadySolution — result of solve_steady()
 # ---------------------------------------------------------------------------
 
-class SteadySolution:
+class PDESteadySolution:
     """
     Result of PDESystem.solve_steady() or PDE.solve_steady().
 
@@ -530,7 +530,7 @@ class SteadySolution:
         f0    = self._fields[0]
         shape = getattr(self, f0).shape
         return (
-            f"SteadySolution(fields={self._fields}, shape={shape}, "
+            f"PDESteadySolution(fields={self._fields}, shape={shape}, "
             f"success={self.success}, residual={self.residual:.2e}, "
             f"nfev={self.nfev})"
         )
@@ -1010,7 +1010,7 @@ class PDE:
 
         Returns
         -------
-        PDESolution
+        PDEUnsteadySolution
 
         Example
         -------
@@ -1052,7 +1052,7 @@ class PDE:
 
         Returns
         -------
-        SteadySolution
+        PDESteadySolution
 
         Raises
         ------
@@ -1235,7 +1235,7 @@ class PDESystem:
 
         Returns
         -------
-        PDESolution
+        PDEUnsteadySolution
           1D fields: shape (nx, nt)
           2D fields: shape (nx, ny, nt)
         """
@@ -1300,7 +1300,7 @@ class PDESystem:
             self._rhs, t_span, y0,
             method=method, t_eval=t_eval, **kwargs
         )
-        return PDESolution(ivp, self.equations)
+        return PDEUnsteadySolution(ivp, self.equations)
 
     def solve_steady(self, guess=None, method='hybr', **kwargs):
         """
@@ -1321,7 +1321,7 @@ class PDESystem:
 
         Returns
         -------
-        SteadySolution
+        PDESteadySolution
 
         Example — steady heat conduction
         ---------------------------------
@@ -1354,7 +1354,7 @@ class PDESystem:
         y0 = np.concatenate(y0_parts)
 
         opt = root(self._rhs_steady, y0, method=method, **kwargs)
-        return SteadySolution(opt, self.equations)
+        return PDESteadySolution(opt, self.equations)
 
     # ------------------------------------------------------------------
     # Internal: residual for solve_steady

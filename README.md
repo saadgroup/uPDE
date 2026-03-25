@@ -45,8 +45,8 @@ writing any solver code yourself.
 - [API Reference](#api-reference)
   - [PDE](#pde)
   - [PDESystem](#pdesystem)
-  - [PDESolution](#pdesolution)
-  - [SteadySolution](#steadysolution)
+  - [PDEUnsteadySolution](#pdeunsteadysolution)
+  - [PDESteadySolution](#pdesteadysolution)
   - [Operator Reference](#operator-reference)
 - [Numerical Methods](#numerical-methods)
 - [Troubleshooting](#troubleshooting)
@@ -159,7 +159,7 @@ consistent, assembles the joint state vector, and delegates to SciPy:
 - `PDESystem.solve(t_span, ...)` → calls `scipy.integrate.solve_ivp`
 - `PDESystem.solve_steady(guess=None, ...)` → calls `scipy.optimize.root`
 
-### PDESolution — transient result
+### PDEUnsteadySolution — transient result
 
 Fields are accessed by name as attributes. Spatial indices come first, time last:
 
@@ -173,7 +173,7 @@ sol.message     # integrator status string
 sol.raw         # raw scipy OdeResult
 ```
 
-### SteadySolution — steady-state result
+### PDESteadySolution — steady-state result
 
 ```python
 sol.T           # (nx,) in 1D  |  (nx, ny) in 2D  — no time dimension
@@ -475,7 +475,7 @@ print(sol.nfev)       # number of RHS evaluations
 ```
 
 Use `sol.residual` rather than `sol.success` as the primary convergence check —
-see the note in [SteadySolution](#steadysolution).
+see the note in [PDESteadySolution](#pdesteadysolution).
 
 ---
 
@@ -739,7 +739,7 @@ Validates field references at construction time.
 
 ---
 
-### PDESolution
+### PDEUnsteadySolution
 
 Returned by `solve()`.
 
@@ -753,7 +753,7 @@ Returned by `solve()`.
 
 ---
 
-### SteadySolution
+### PDESteadySolution
 
 Returned by `solve_steady()`.
 

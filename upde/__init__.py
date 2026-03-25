@@ -33,7 +33,7 @@ Example
     # sol.T  shape (256, nt)
 """
 
-from .upde import PDE, PDESystem, PDESolution, SteadySolution
+from .upde import PDE, PDESystem, PDEUnsteadySolution, PDESteadySolution
 
 
 from .equations import (
@@ -59,7 +59,7 @@ __email__   = "tony.saad@utah.edu"
 
 __all__ = [
     # Core
-    "PDE", "PDESystem", "PDESolution",
+    "PDE", "PDESystem", "PDEUnsteadySolution", "PDESteadySolution",
     # Single-field equations
     "HeatEquation", "AdvectionDiffusion", "Burgers",
     "ConservationLaw", "ReactionDiffusion",
