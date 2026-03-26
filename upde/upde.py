@@ -440,6 +440,7 @@ class _InteriorBC:
                 # value is a spatial callable — cannot evaluate at t alone;
                 # return None to signal spatial evaluation needed
                 return None
+        return float(self.value)
 
 
 
