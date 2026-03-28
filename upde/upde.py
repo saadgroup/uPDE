@@ -802,16 +802,34 @@ class PDE:
                 2D : 'left' | 'right' | 'bottom' | 'top' | 'x' | 'y' | 'all'
                      'x'   -- periodic in x  (left AND right walls)
                      'y'   -- periodic in y  (bottom AND top walls)
-                     'all' -- periodic on all four sides
+                     'all' -- apply to all four sides (scalar value only)
+                     list  -- e.g. ['left', 'right'] to set multiple sides at once
                 (shorthand; ignored if mask= is given)
         mask  : bool ndarray matching the field shape (nx,) or (nx, ny)
-                Overrides side=.
-        value : scalar | callable(t)
+                Overrides side=.  No deduplication is performed for mask= calls;
+                multiple mask= BCs on overlapping regions are all retained and
+                applied in registration order (last Dirichlet write wins).
+        value : scalar | callable(t) | list
                 dirichlet -- prescribed field value
                 neumann   -- prescribed outward normal derivative dphi/dn
+                When side is a list, value may be a matching list of per-side
+                values, or a single scalar/callable applied to all listed sides.
 
         Notes
         -----
+        **Override semantics:** registering a new BC for a named side
+        automatically removes any previously registered BC for that same side,
+        so later calls cleanly override earlier ones::
+
+            eq.set_bc(side='all', kind='dirichlet', value=0.0)  # 4 sides
+            eq.set_bc(side='top', kind='neumann',   value=0.0)  # overrides top
+
+        This does *not* apply to mask= calls, which always append.  That lets
+        you intentionally layer a partial mask on top of a full-wall BC::
+
+            eq.set_bc(side='left',     kind='dirichlet', value=0.0)
+            eq.set_bc(mask=inlet_mask, kind='dirichlet', value=1.0)
+
         Periodic BCs must be set in *pairs* -- a boundary is periodic only if
         both ends of that axis are periodic.  Use side='x', side='y', or
         side='all' to express this clearly in 2D.  In 1D, any call with
@@ -822,7 +840,48 @@ class PDE:
             eq.set_bc(kind='periodic', side='x')   # periodic left/right
             eq.set_bc(kind='periodic', side='y')   # periodic bottom/top
             eq.set_bc(kind='periodic', side='all') # fully periodic
+
+            # Same BC on multiple sides
+            eq.set_bc(side=['left', 'right'], kind='dirichlet', value=0.0)
+
+            # Different values per side
+            eq.set_bc(side=['left', 'right'], kind='dirichlet', value=[1.0, 0.0])
+
+            # Default + override pattern
+            eq.set_bc(side='all', kind='dirichlet', value=0.0)
+            eq.set_bc(side='top', kind='neumann',   value=0.0)
         """
+        # --- list-of-sides: unroll recursively --------------------------------
+        if isinstance(side, list):
+            if isinstance(value, list):
+                if len(value) != len(side):
+                    raise ValueError(
+                        f"side list has {len(side)} entries but value list has "
+                        f"{len(value)}; they must match."
+                    )
+                for s, v in zip(side, value):
+                    self.set_bc(kind=kind, side=s, value=v)
+            else:
+                for s in side:
+                    self.set_bc(kind=kind, side=s, value=value)
+            return self
+
+        # --- side='all' expands to every named side ---------------------------
+        if side == 'all' and kind != 'periodic':
+            if isinstance(value, list):
+                raise ValueError(
+                    "side='all' does not accept a list value because the side "
+                    "order would be ambiguous.  Use "
+                    "side=['left','right','bottom','top'] with a matching "
+                    "value list instead."
+                )
+            sides = ['left', 'right', 'bottom', 'top'] if self.is_2d \
+                    else ['left', 'right']
+            for s in sides:
+                self.set_bc(kind=kind, side=s, value=value)
+            return self
+
+        # --- periodic ---------------------------------------------------------
         if kind == 'periodic':
             if self.is_2d:
                 if side is None or side == 'all':
@@ -842,6 +901,7 @@ class PDE:
                 self._bcs.append(_BC('periodic', np.zeros(self.nx, dtype=bool)))
             return self
 
+        # --- dirichlet / neumann ----------------------------------------------
         if kind not in ('dirichlet', 'neumann'):
             raise ValueError(
                 f"kind must be 'periodic', 'dirichlet', or 'neumann'; got '{kind}'"
@@ -853,6 +913,9 @@ class PDE:
             bc_mask = np.asarray(mask, dtype=bool)
             normal  = None   # user-supplied mask; normal inferred later if needed
         elif side is not None:
+            # Remove any existing BC for this named side before appending so
+            # that the new registration cleanly overrides the old one.
+            self._remove_bcs_for_side(side)
             bc_mask, normal = self._side_to_mask(side)
         else:
             raise ValueError(
@@ -861,6 +924,28 @@ class PDE:
 
         self._bcs.append(_BC(kind, bc_mask, value, normal=normal))
         return self
+
+    # Maps each named wall to the normal string used in _BC.normal
+    _SIDE_NORMAL = {
+        'left': 'x-', 'right': 'x+', 'bottom': 'y-', 'top': 'y+',
+    }
+
+    def _remove_bcs_for_side(self, side):
+        """
+        Remove any existing non-periodic BC whose normal matches *side*.
+
+        Called before registering a new named-side BC so that later set_bc
+        calls cleanly override earlier ones for the same wall.
+        No-ops for compound sides ('both', 'x', 'y') — those are handled by
+        their callers expanding into individual named sides.
+        """
+        target = self._SIDE_NORMAL.get(side)
+        if target is None:
+            return
+        self._bcs = [
+            bc for bc in self._bcs
+            if not (bc.kind != 'periodic' and bc.normal == target)
+        ]
 
     def set_interior_bc(self, mask, kind='dirichlet', value=None):
         """
