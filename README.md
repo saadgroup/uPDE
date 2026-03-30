@@ -1,7 +1,7 @@
 <!-- Last modified: 2026-03-28 UTC -->
 # uPDE
 
-Interactive Equation Builder: https://saadgroup.a2hosted.com
+Interactive Equation Builder: https://saadgroup.a2hosted.com/upde
 
 > A lightweight Python library for solving 1D and 2D PDEs using the method of lines.
 
