@@ -1,4 +1,4 @@
-<!-- Last modified: 2026-03-24 14:51 UTC -->
+<!-- Last modified: 2026-03-28 UTC -->
 # uPDE
 
 > A lightweight Python library for solving 1D and 2D PDEs using the method of lines.
@@ -277,6 +277,37 @@ eq.set_bc(kind='periodic', side='y')     # 2D — wrap bottom ↔ top
 eq.set_bc(kind='periodic', side='all')   # 2D — fully periodic
 ```
 
+#### Setting multiple sides at once
+
+Pass a list of sides, or use `side='all'` to target every wall in one call:
+
+```python
+# Same BC on multiple sides
+eq.set_bc(side=['left', 'right'], kind='dirichlet', value=0.0)
+
+# Different value per side — list must match length of side list
+eq.set_bc(side=['left', 'right'], kind='dirichlet', value=[1.0, 0.0])
+
+# All four sides at once (2D); left and right only (1D)
+eq.set_bc(side='all', kind='neumann', value=0.0)
+```
+
+`side='all'` only accepts a scalar value. To set different values on different
+sides, use an explicit list of sides with a matching value list.
+
+#### Override semantics
+
+Registering a new BC for a named side automatically removes any previously
+registered BC for that wall. This makes a default-then-override pattern natural:
+
+```python
+# Dirichlet on three sides, Neumann on one
+eq.set_bc(side='all', kind='dirichlet', value=0.0)
+eq.set_bc(side='top', kind='neumann',   value=0.0)   # replaces top
+```
+
+Each `set_bc(side=...)` call is a clean override — no stale entries accumulate.
+
 #### Side shortcuts
 
 | Dimension | `side=` | Edge |
@@ -294,6 +325,16 @@ eq.set_bc(kind='periodic', side='all')   # 2D — fully periodic
 mask = np.zeros((nx, ny), dtype=bool)
 mask[0, :ny//2] = True                       # bottom half of left wall
 eq.set_bc(mask=mask, kind='dirichlet', value=2.0)
+```
+
+`mask=` calls always append and are never deduplicated. This lets you layer a
+partial-wall BC on top of a full-wall one — both are applied, with the last
+Dirichlet write winning at any overlapping nodes:
+
+```python
+# Full left wall at 0, inlet strip at 1
+eq.set_bc(side='left',     kind='dirichlet', value=0.0)
+eq.set_bc(mask=inlet_mask, kind='dirichlet', value=1.0)
 ```
 
 ---
@@ -713,7 +754,7 @@ PDE(field, x, y=None)
 | `add_flux(flux=, scheme=)` | 1D conservation law $-\partial_x F(\phi)$ |
 | `add_flux(flux_x=, flux_y=, scheme=)` | 2D conservation law |
 | `add_term(fn)` | Generic operator term — see [Operator Reference](#operator-reference) |
-| `set_bc(kind, side=, mask=, value=)` | Domain boundary condition |
+| `set_bc(kind, side=, mask=, value=)` | Domain boundary condition; `side` may be a string, `'all'`, or a list of sides; `value` may be a matching list when `side` is a list |
 | `set_interior_bc(mask, kind, value=)` | Interior obstacle BC |
 | `set_ic(ic)` | Initial condition: scalar, array, or callable |
 | `solve(t_span, **kwargs)` | Transient solve (uncoupled equations only) |
