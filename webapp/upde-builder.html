@@ -3,9 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>uPDE — Equation Builder</title>
+<title>uPDE — Equation Builder + AI</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -148,17 +151,118 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
 .hint-bar { display:flex; align-items:center; gap:8px; padding:6px 14px; background:var(--amber-bg); border-top:0.5px solid var(--amber-bd); font-size:11px; color:var(--amber-tx); }
 .hint-bar.hidden { display:none; }
 .hint-dot { width:6px; height:6px; border-radius:50%; background:var(--amber-bd); flex-shrink:0; }
+
+/* tabs */
+.tab-strip{display:flex;border-bottom:0.5px solid var(--border2);}
+.tab-btn{font-size:12px;padding:7px 18px;border:none;background:transparent;color:var(--text3);cursor:pointer;font-family:var(--font);border-bottom:2px solid transparent;margin-bottom:-0.5px;transition:color .12s;}
+.tab-btn:hover{color:var(--text);}
+.tab-btn.active{color:var(--purple-tx);border-bottom-color:var(--purple-bd);font-weight:500;}
+#tab-builder{display:none;}
+#tab-builder.active{display:grid;grid-template-columns:180px 1fr;min-height:600px;}
+#tab-ai{display:none;}
+#tab-ai.active{display:flex;flex-direction:column;min-height:600px;}
+
+/* solve mode */
+.solve-mode-toggle{display:flex;border:0.5px solid var(--border2);border-radius:var(--radius);overflow:hidden;}
+.smt-btn{font-size:11px;padding:3px 10px;border:none;background:transparent;color:var(--text2);cursor:pointer;font-family:var(--font);transition:background .12s;}
+.smt-btn.active{background:var(--teal-bg);color:var(--teal-tx);}
+.lane-eq-label.steady{color:var(--teal-tx);font-weight:500;}
+#sb-steady{display:none;}
+
+/* AI tab */
+:root{--cbg:#0d0f14;--csurf:#13161e;--cpanel:#1a1e29;--cbord:#252a38;--cacc:#4f8ef7;--cacc2:#7c5cbf;--ctxt:#dde2f0;--cmut:#5c6480;--ccode:#0a0c10;--cuser:#1c2340;}
+.ai-wrap{display:flex;flex-direction:column;flex:1;background:var(--cbg);color:var(--ctxt);font-family:'DM Sans',sans-serif;overflow:hidden;}
+.ai-hdr{padding:.9rem 1.5rem;background:var(--csurf);border-bottom:1px solid var(--cbord);display:flex;align-items:center;gap:1rem;flex-shrink:0;}
+.ai-logo{width:34px;height:34px;background:linear-gradient(135deg,var(--cacc),var(--cacc2));border-radius:7px;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-weight:500;color:#fff;font-size:14px;flex-shrink:0;}
+.ai-hdr-txt h1{font-size:1rem;font-weight:600;}
+.ai-hdr-txt p{font-size:.72rem;color:var(--cmut);}
+.ai-hdr-act{margin-left:auto;display:flex;gap:8px;align-items:center;}
+.hdrbtn{background:transparent;border:1px solid var(--cbord);color:var(--cmut);font-size:.72rem;padding:5px 10px;border-radius:6px;cursor:pointer;transition:color .15s,border-color .15s;}
+.hdrbtn:hover{color:var(--ctxt);border-color:var(--cacc);}
+.ai-stat{display:flex;align-items:center;gap:5px;font-size:.72rem;color:var(--cmut);}
+.ai-stat::before{content:'';width:6px;height:6px;border-radius:50%;background:#3ecf8e;display:block;}
+.ai-stat.loading::before{background:var(--cacc);animation:cpulse 1s infinite;}
+.ai-stat.error::before{background:#f08080;}
+@keyframes cpulse{0%,100%{opacity:1}50%{opacity:.4}}
+#chat-box{flex:1;overflow-y:auto;padding:2rem 1.5rem;display:flex;flex-direction:column;gap:1.5rem;min-height:0;}
+#ai-welcome{margin:auto;text-align:center;padding:3rem 1rem;max-width:600px;display:flex;flex-direction:column;align-items:center;gap:1rem;}
+.ai-wico{width:52px;height:52px;background:linear-gradient(135deg,var(--cacc),var(--cacc2));border-radius:13px;display:grid;place-items:center;font-size:22px;}
+#ai-welcome h2{font-size:1.3rem;font-weight:600;}
+#ai-welcome p{font-size:.88rem;color:var(--cmut);line-height:1.7;}
+.ai-chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:6px;}
+.ai-chip{background:var(--cpanel);border:1px solid var(--cbord);border-radius:20px;padding:6px 14px;font-size:.78rem;color:var(--ctxt);cursor:pointer;transition:border-color .15s,background .15s;}
+.ai-chip:hover{border-color:var(--cacc);background:var(--cuser);}
+.ai-msg{max-width:86%;padding:.9rem 1rem;border-radius:10px;line-height:1.7;font-size:.88rem;}
+.ai-user{align-self:flex-end;background:var(--cuser);border:1px solid #2b3560;white-space:pre-wrap;border-bottom-right-radius:3px;}
+.ai-bot{align-self:flex-start;background:var(--cpanel);border:1px solid var(--cbord);border-bottom-left-radius:3px;}
+.ai-bot p{margin:5px 0;}
+.ai-bot h1,.ai-bot h2,.ai-bot h3{font-weight:600;margin:10px 0 4px;color:#fff;}
+.ai-bot h1{font-size:1rem}.ai-bot h2{font-size:.95rem}.ai-bot h3{font-size:.9rem}
+.ai-bot ul,.ai-bot ol{padding-left:20px;margin:5px 0;}
+.ai-bot li{margin:3px 0;}
+.ai-bot strong{color:#fff;font-weight:600}
+.ai-cblk{position:relative;margin:.7rem 0;}
+.ai-cblk pre{background:var(--ccode);padding:.9rem 1rem;padding-top:2.2rem;border-radius:8px;overflow-x:auto;margin:0;font-family:'JetBrains Mono',monospace;font-size:.8rem;border:1px solid #333;}
+.ai-cblk code{font-family:'JetBrains Mono',monospace;background:none;padding:0;color:#a9b7c6;white-space:pre;font-size:.8rem;}
+.ai-cpbtn{position:absolute;top:7px;right:7px;background:#1e2330;border:1px solid var(--cbord);color:var(--cmut);border-radius:5px;padding:3px 8px;font-size:.68rem;cursor:pointer;transition:color .15s,border-color .15s;}
+.ai-cpbtn:hover{color:var(--ctxt);border-color:var(--cacc);}
+.ai-cpbtn.ok{color:#3ecf8e;border-color:#3ecf8e;}
+.hcm{color:#5a7a5a;font-style:italic;font-weight:normal;}
+.hst{color:#8ec98e;}
+.hkw{color:#7eb8f7;}
+.hbn{color:#5dcaa5;}
+.hnm{color:#f0a070;}
+/* override hljs background to match our code panel */
+.ai-cblk .hljs{background:transparent;padding:0;}
+.ai-think{display:flex;gap:5px;align-items:center;padding:.9rem 1rem;}
+.ai-think span{width:7px;height:7px;border-radius:50%;background:var(--cacc);animation:cbounce .9s infinite;}
+.ai-think span:nth-child(2){animation-delay:.15s}.ai-think span:nth-child(3){animation-delay:.3s}
+@keyframes cbounce{0%,100%{opacity:.3;transform:translateY(0)}50%{opacity:1;transform:translateY(-4px)}}
+.ai-err{padding:10px 14px;background:rgba(220,60,60,.1);border:1px solid rgba(220,60,60,.25);border-radius:8px;font-size:.82rem;color:#f08080;max-width:86%;align-self:flex-start;}
+#ai-imgprev{display:flex;align-items:center;padding:6px 12px 0;flex-wrap:wrap;gap:4px;background:var(--csurf);}
+.ai-ipwrap{position:relative;display:inline-block;}
+.ai-ipwrap img{height:48px;width:48px;object-fit:cover;border-radius:6px;border:1px solid var(--cbord);display:block;}
+.ai-iprm{position:absolute;top:-5px;right:-5px;width:16px;height:16px;background:#f08080;border-radius:50%;border:none;cursor:pointer;font-size:9px;color:#fff;display:flex;align-items:center;justify-content:center;}
+.ai-inp-area{padding:1rem 1.5rem 1.2rem;background:var(--csurf);border-top:1px solid var(--cbord);flex-shrink:0;}
+.ai-inp-row{display:flex;gap:8px;align-items:flex-end;background:var(--cpanel);border:1px solid var(--cbord);border-radius:10px;padding:8px 10px;transition:border-color .2s;}
+.ai-inp-row:focus-within{border-color:var(--cacc);}
+#ai-txt{flex:1;background:none;border:none;outline:none;color:var(--ctxt);font-family:'DM Sans',sans-serif;font-size:.88rem;resize:none;min-height:22px;max-height:120px;line-height:1.5;}
+#ai-txt::placeholder{color:var(--cmut);}
+.ai-icobtn{background:none;border:none;color:var(--cmut);cursor:pointer;padding:4px;border-radius:6px;display:flex;align-items:center;transition:color .15s;flex-shrink:0;}
+.ai-icobtn:hover{color:var(--ctxt);}
+#ai-sendbtn{background:var(--cacc);border:none;border-radius:7px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:white;flex-shrink:0;transition:background .15s;}
+#ai-sendbtn:hover{background:#6da3ff;}
+#ai-sendbtn:disabled{background:var(--cbord);cursor:not-allowed;}
+#ai-filein{display:none;}
+/* tip bar + user key */
+.ai-tipbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:.55rem 1.5rem;background:#161d12;border-bottom:1px solid #2a3520;font-size:.72rem;color:#7a9e60;flex-shrink:0;}
+.ai-tipbar strong{color:#a0c878;}
+.ai-tipbar a{color:#7eb8f7;text-decoration:none;}
+.ai-tipbar a:hover{text-decoration:underline;}
+.ai-keyrow{display:flex;align-items:center;gap:6px;margin-left:auto;}
+.ai-keyrow label{color:#7a9e60;white-space:nowrap;font-size:.7rem;}
+#ai-userkey{font-family:'JetBrains Mono',monospace;font-size:.7rem;padding:3px 8px;border-radius:4px;border:1px solid #2e4020;background:#0f1a0c;color:#b8dea0;width:210px;outline:none;transition:border-color .15s;}
+#ai-userkey:focus{border-color:#5dcaa5;}
+#ai-userkey::placeholder{color:#3a5030;}
+.ai-keybadge{font-size:.68rem;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0;}
+.ai-keybadge.shared{background:#1a2a16;color:#5dcaa5;border:1px solid #2a4a1a;}
+.ai-keybadge.personal{background:#163020;color:#3ecf8e;border:1px solid #1e5a28;}
 </style>
 </head>
 <body>
 
 <div class="page-header">
   <span class="page-title">uPDE</span>
-  <span class="page-sub">equation builder</span>
+  <span class="page-sub">v2.0</span>
   <a class="page-link" href="https://github.com/saadgroup/upde" target="_blank">GitHub →</a>
 </div>
 
-<div class="app" id="app">
+<div class="tab-strip">
+  <button class="tab-btn active" id="tb-builder" onclick="switchTab('builder')">Equation builder</button>
+  <button class="tab-btn" id="tb-ai" onclick="switchTab('ai')">Ask AI</button>
+</div>
+
+<div id="tab-builder" class="app active">
   <div class="sidebar">
     <div>
       <div class="sb-label">Terms</div>
@@ -168,7 +272,7 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
       <div class="chip" draggable="true" data-type="flux"><span class="dot" style="background:#D85A30"></span>Flux (conservative)</div>
       <div class="chip" draggable="true" data-type="custom"><span class="dot" style="background:#888780"></span>Custom add_term</div>
     </div>
-    <div class="sb-ctrl">
+    <div class="sb-ctrl" id="sb-transient">
       <div class="sb-label">Solver</div>
       <label>method</label>
       <select id="solver-select" onchange="render()">
@@ -182,6 +286,17 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
         <input id="t0" value="0" placeholder="t0" oninput="render()">
         <input id="t1" value="1" placeholder="tf" oninput="render()">
       </div>
+    </div>
+    <div class="sb-ctrl" id="sb-steady">
+      <div class="sb-label">Steady-state solver</div>
+      <label>method</label>
+      <select id="steady-method" onchange="render()">
+        <option value="hybr">hybr (default)</option>
+        <option value="lm">lm — Levenberg-Marquardt</option>
+        <option value="krylov">krylov — large systems</option>
+        <option value="broyden1">broyden1 — Broyden</option>
+      </select>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.5">Guess set via IC row below.<br>Check sol.residual for convergence.</div>
     </div>
     <div class="sb-ctrl">
       <div class="sb-label">Grid</div>
@@ -209,6 +324,11 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
         <option value="1">1D</option>
         <option value="2">2D</option>
       </select>
+      <span class="tbar-label" style="margin-left:8px">Mode:</span>
+      <div class="solve-mode-toggle">
+        <button class="smt-btn active" id="mode-transient" onclick="setSolveMode('transient')">Transient</button>
+        <button class="smt-btn" id="mode-steady" onclick="setSolveMode('steady')">Steady-state</button>
+      </div>
       <button class="add-field-btn" onclick="promptAddField()">+ add field</button>
       <button class="add-field-btn" onclick="resetAll()" style="margin-left:6px;color:var(--text3)">reset</button>
     </div>
@@ -226,6 +346,58 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
         </div>
       </div>
       <pre id="codebox"></pre>
+    </div>
+  </div>
+</div><!-- /tab-builder -->
+
+<div id="tab-ai">
+  <div class="ai-wrap">
+    <div class="ai-hdr">
+      <div class="ai-logo">&#x2202;</div>
+      <div class="ai-hdr-txt"><h1>uPDE Assistant</h1><p>Describe your PDE — get ready-to-run Python code</p></div>
+      <div class="ai-hdr-act">
+        <span class="ai-stat" id="ai-stat">Ready</span>
+        <button class="hdrbtn" onclick="aiClear()">Clear</button>
+      </div>
+    </div>
+    <div class="ai-tipbar">
+      <span>&#128161; <strong>Tip:</strong> Using shared quota. For unlimited personal requests, add your own free key from <a href="https://console.groq.com" target="_blank">console.groq.com</a> — stored only in your browser.</span>
+      <div class="ai-keyrow">
+        <label for="ai-userkey">Your key:</label>
+        <input type="password" id="ai-userkey" placeholder="gsk_... (optional)" autocomplete="off" oninput="aiHandleKeyInput()">
+        <button onclick="aiClearKey()" title="Clear key — revert to shared" style="background:none;border:1px solid #2e4020;color:#5a7a50;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:.68rem;flex-shrink:0;">clear</button>
+        <span class="ai-keybadge shared" id="ai-keybadge">shared</span>
+      </div>
+    </div>
+    <div id="chat-box">
+      <div id="ai-welcome">
+        <div class="ai-wico">&#x2202;</div>
+        <h2>What PDE would you like to solve?</h2>
+        <p>Describe your problem or upload an equation image — I'll generate complete, ready-to-run uPDE Python code.</p>
+        <div class="ai-chips">
+          <div class="ai-chip" onclick="aiChip(this)">1D heat equation, Dirichlet BCs</div>
+          <div class="ai-chip" onclick="aiChip(this)">Advection-diffusion with periodic BCs</div>
+          <div class="ai-chip" onclick="aiChip(this)">Burgers equation with viscosity</div>
+          <div class="ai-chip" onclick="aiChip(this)">Steady-state diffusion, nonlinear D(T)</div>
+          <div class="ai-chip" onclick="aiChip(this)">Gray-Scott reaction-diffusion patterns</div>
+          <div class="ai-chip" onclick="aiChip(this)">Coupled A+B to C, solve_steady</div>
+          <div class="ai-chip" onclick="aiChip(this)">2D Navier-Stokes lid-driven cavity</div>
+          <div class="ai-chip" onclick="aiChip(this)">How do I add a time-dependent BC?</div>
+        </div>
+      </div>
+    </div>
+    <div id="ai-imgprev"></div>
+    <div class="ai-inp-area">
+      <div class="ai-inp-row">
+        <button class="ai-icobtn" onclick="document.getElementById('ai-filein').click()" title="Upload equation image">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        </button>
+        <input type="file" id="ai-filein" accept="image/*" multiple onchange="aiImgs(this.files)">
+        <textarea id="ai-txt" rows="1" placeholder="Describe your PDE problem…"></textarea>
+        <button id="ai-sendbtn" onclick="aiSend()" title="Send">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -810,6 +982,358 @@ function tryRender() {
   else { window.addEventListener('load', render, {once:true}); }
 }
 document.addEventListener('DOMContentLoaded', tryRender);
+
+/* ── TAB SWITCHING ── */
+function switchTab(name) {
+  document.getElementById('tb-builder').classList.toggle('active', name==='builder');
+  document.getElementById('tb-ai').classList.toggle('active', name==='ai');
+  document.getElementById('tab-builder').classList.toggle('active', name==='builder');
+  document.getElementById('tab-ai').classList.toggle('active', name==='ai');
+}
+
+/* ── SOLVE MODE ── */
+let solveMode = 'transient';
+
+function setSolveMode(mode) {
+  solveMode = mode;
+  document.getElementById('mode-transient').classList.toggle('active', mode==='transient');
+  document.getElementById('mode-steady').classList.toggle('active', mode==='steady');
+  document.getElementById('sb-transient').style.display = mode==='transient' ? 'flex' : 'none';
+  document.getElementById('sb-steady').style.display = mode==='steady' ? 'flex' : 'none';
+  render();
+}
+
+/* Override updateHint — hide in steady mode */
+const _updateHint = updateHint;
+updateHint = function() {
+  if (solveMode === 'steady') { document.getElementById('hint-bar').classList.add('hidden'); return; }
+  _updateHint();
+};
+
+/* Override renderLanes — patch labels after render */
+const _renderLanes = renderLanes;
+renderLanes = function() {
+  _renderLanes();
+  if (solveMode === 'steady') {
+    document.querySelectorAll('.lane-eq-label').forEach(el => {
+      el.textContent = '0 ='; el.classList.add('steady');
+    });
+    document.querySelectorAll('.ic-bar-label').forEach(el => el.textContent = 'Guess:');
+  }
+};
+
+/* Override buildCodeHTML — steady-state code generation */
+const _buildCodeHTML = buildCodeHTML;
+buildCodeHTML = function() {
+  if (solveMode !== 'steady') return _buildCodeHTML();
+  const d2 = is2d();
+  const method = (gv('steady-method')||'hybr').split(' ')[0];
+  const gx0=gv('gx0')||'0', gx1=gv('gx1')||'1', gn=gv('gn')||'64';
+  const gy0=gv('gy0')||'0', gy1=gv('gy1')||'1', gny=gv('gny')||'64';
+  const L = [];
+  L.push('<span class="kw">import</span> numpy <span class="kw">as</span> np');
+  L.push('<span class="kw">from</span> upde <span class="kw">import</span> PDE, PDESystem');
+  L.push('');
+  L.push('x = np.linspace(<span class="nm">'+gx0+'</span>, <span class="nm">'+gx1+'</span>, <span class="nm">'+gn+'</span>)');
+  if (d2) L.push('y = np.linspace(<span class="nm">'+gy0+'</span>, <span class="nm">'+gy1+'</span>, <span class="nm">'+gny+'</span>)');
+  L.push('');
+  fields.forEach(f => {
+    const n=f.name, yarg=d2?', y=y':'';
+    L.push('eq_'+n+' = PDE(<span class="st">\''+n+'\'</span>, x=x'+yarg+')');
+    f.terms.forEach(t => L.push(termCodeHTML(f,t)));
+    const sides = d2?['left','right','bottom','top']:['left','right'];
+    const hasPer = Object.values(f.bcs).some(b=>b&&b.kind==='periodic');
+    if (hasPer) {
+      L.push('eq_'+n+'.set_bc(kind=<span class="st">\'periodic\'</span>, side=<span class="st">\'all\'</span>)');
+    } else {
+      sides.forEach(s => {
+        const bc=f.bcs[s];
+        if (bc&&bc.kind!=='periodic')
+          L.push('eq_'+n+'.set_bc(side=<span class="st">\''+s+'\'</span>, kind=<span class="st">\''+bc.kind+'\'</span>, value=<span class="st">'+esc(bc.value)+'</span>)');
+      });
+    }
+    L.push('');
+  });
+  const guessFields = fields.filter(f=>f.ic&&f.ic.preset!=='zero');
+  if (guessFields.length) {
+    L.push('<span class="cm"># initial guess for Newton solver</span>');
+    if (fields.length===1) {
+      L.push('guess = <span class="st">'+esc(icExprFor(guessFields[0]))+'</span>');
+    } else {
+      L.push('guess = {');
+      guessFields.forEach(f => L.push('    <span class="st">\''+f.name+'\'</span>: <span class="st">'+esc(icExprFor(f))+'</span>,'));
+      L.push('}');
+    }
+    L.push('');
+  }
+  if (fields.length===1) {
+    L.push('sol = eq_'+fields[0].name+'.solve_steady(');
+  } else {
+    L.push('sol = PDESystem(['+fields.map(f=>'eq_'+f.name).join(', ')+']). solve_steady(');
+  }
+  if (guessFields.length) L.push('    guess=guess,');
+  L.push('    method=<span class="st">\''+method+'\'</span>,');
+  L.push(')');
+  L.push('');
+  L.push('<span class="cm"># check convergence — use residual, not sol.success</span>');
+  L.push('<span class="cm"># print(f\'residual: {sol.residual:.2e}\')  # target &lt; 1e-8</span>');
+  L.push('');
+  fields.forEach(f => L.push('<span class="cm"># sol.'+f.name+'  shape ('+(d2?'nx, ny':'nx,')+')</span>'));
+  return L.join('\n');
+};
+
+/* Override resetAll — also reset solve mode */
+const _resetAll = resetAll;
+resetAll = function() {
+  _resetAll();
+  solveMode = 'transient';
+  setSolveMode('transient');
+};
+
+/* ── AI ASSISTANT ── */
+const AI_MDL = 'llama-3.3-70b-versatile';
+const AI_VIS = 'meta-llama/llama-4-scout-17b-16e-instruct';
+let AI_SYS = '';  // loaded from instructions.txt
+
+async function aiLoadInstructions() {
+  try {
+    const r = await fetch('instructions.txt');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    AI_SYS = await r.text();
+    console.log('[uPDE] Instructions loaded:', AI_SYS.length, 'chars');
+  } catch(e) {
+    console.warn('[uPDE] Could not load instructions.txt:', e.message);
+    AI_SYS = 'You are a technical assistant for the uPDE Python library. Generate correct, complete Python code.';
+  }
+}
+
+// Load instructions immediately
+aiLoadInstructions();
+
+let aiHist = [], aiBusy = false, aiImgQ = [];
+
+const AI_PROXY = 'https://saadgroup.a2hosted.com/upde/proxy.php';
+const AI_DIRECT = 'https://api.groq.com/openai/v1/chat/completions';
+
+function aiGetUserKey() {
+  // Check input field first, then localStorage
+  const field = document.getElementById('ai-userkey');
+  const val = field ? field.value.trim() : '';
+  if (val) { localStorage.setItem('groq_user_key', val); return val; }
+  return localStorage.getItem('groq_user_key') || '';
+}
+
+function aiClearKey() {
+  const field = document.getElementById('ai-userkey');
+  if (field) field.value = '';
+  localStorage.removeItem('groq_user_key');
+  aiHandleKeyInput();
+}
+
+function aiHandleKeyInput() {
+  const key = aiGetUserKey();
+  const badge = document.getElementById('ai-keybadge');
+  if (!badge) return;
+  if (key) {
+    badge.textContent = 'your key';
+    badge.className = 'ai-keybadge personal';
+  } else {
+    badge.textContent = 'shared';
+    badge.className = 'ai-keybadge shared';
+  }
+}
+
+function aiGetEndpoint() {
+  return aiGetUserKey() ? AI_DIRECT : AI_PROXY;
+}
+
+function aiGetHeaders() {
+  const key = aiGetUserKey();
+  const h = {'Content-Type': 'application/json'};
+  if (key) h['Authorization'] = 'Bearer ' + key;
+  return h;
+}
+
+// Restore saved key on load
+document.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('groq_user_key');
+  const field = document.getElementById('ai-userkey');
+  if (saved && field) { field.value = saved; aiHandleKeyInput(); }
+});
+
+function aiStat(txt, loading, error) {
+  const el=document.getElementById('ai-stat'); if(!el) return;
+  el.textContent=txt;
+  el.className='ai-stat'+(loading?' loading':error?' error':'');
+}
+
+function aiRmWelcome() { const w=document.getElementById('ai-welcome'); if(w) w.remove(); }
+
+function aiImgs(files) {
+  Array.from(files).forEach(file=>{
+    if (!file.type.startsWith('image/')) return;
+    const r=new FileReader();
+    r.onload=e=>{
+      const b64=e.target.result.split(',')[1];
+      const idx=aiImgQ.length; aiImgQ.push({mimeType:file.type,data:b64});
+      const prev=document.getElementById('ai-imgprev');
+      const wrap=document.createElement('div'); wrap.className='ai-ipwrap';
+      const img=document.createElement('img'); img.src=e.target.result;
+      const rm=document.createElement('button'); rm.className='ai-iprm'; rm.textContent='x';
+      rm.onclick=()=>{aiImgQ.splice(idx,1);wrap.remove();};
+      wrap.appendChild(img); wrap.appendChild(rm); prev.appendChild(wrap);
+    };
+    r.readAsDataURL(file);
+  });
+  document.getElementById('ai-filein').value='';
+}
+
+async function aiSend() {
+  const inp=document.getElementById('ai-txt');
+  const txt=inp.value.trim();
+  if ((!txt&&!aiImgQ.length)||aiBusy) return;
+  if (!AI_SYS) {
+    await aiLoadInstructions();
+  }
+  const btn=document.getElementById('ai-sendbtn'); btn.disabled=true;
+  inp.value=''; inp.style.height='';
+  aiStat('Generating…',true);
+  const imgs=[...aiImgQ]; aiImgQ=[];
+  document.getElementById('ai-imgprev').innerHTML='';
+  aiAddUser(txt,imgs); aiRmWelcome();
+
+  const hasImgs = imgs.length > 0;
+
+  /* Vision requests: use vision model, no system message (Groq limitation),
+     inject instructions into user content instead. Text-only: use fast model + system message. */
+  let messages;
+  if (hasImgs) {
+    // Llama 4 Scout supports system messages + images
+    const userContent = [
+      {type:'text', text: txt||'What PDE does this equation show? Write complete uPDE code for it.'},
+      {type:'image_url', image_url:{url:'data:'+imgs[0].mimeType+';base64,'+imgs[0].data}}
+    ];
+    messages = [{role:'system', content:AI_SYS}, {role:'user', content: userContent}];
+  } else {
+    aiHist.push({role:'user', content: txt});
+    messages = [{role:'system', content:AI_SYS}, ...aiHist];
+  }
+
+  const model = hasImgs ? AI_VIS : AI_MDL;
+  aiShowThink();
+  try {
+    const res=await fetch(aiGetEndpoint(),{
+      method:'POST',
+      headers:aiGetHeaders(),
+      body:JSON.stringify({model, max_tokens:2048, messages})
+    });
+    const data=await res.json();
+    if (data.error) throw new Error(data.error.message);
+    const reply=data.choices[0].message.content;
+    // Only push to history for text turns (vision turns are stateless)
+    if (!hasImgs) aiHist.push({role:'assistant', content:reply});
+    aiHideThink(); aiAddBot(reply); aiStat('Ready');
+  } catch(e) {
+    aiHideThink();
+    aiAddErr(e.message.includes('429')?'Rate limit — wait a moment and retry.':e.message);
+    aiStat('Error',false,true);
+    if (!hasImgs) aiHist.pop();
+  }
+  aiBusy=false; btn.disabled=false; inp.focus();
+}
+
+function aiChip(el){document.getElementById('ai-txt').value=el.textContent;aiSend();}
+
+function aiClear(){
+  aiHist=[];aiImgQ=[];
+  document.getElementById('ai-imgprev').innerHTML='';
+  const c=document.getElementById('chat-box'); c.innerHTML='';
+  const w=document.createElement('div'); w.id='ai-welcome';
+  w.innerHTML='<div class="ai-wico">&#x2202;</div><h2>What PDE would you like to solve?</h2><p>Describe your problem or upload an equation image.</p><div class="ai-chips"><div class="ai-chip" onclick="aiChip(this)">1D heat equation, Dirichlet BCs</div><div class="ai-chip" onclick="aiChip(this)">Steady-state diffusion, nonlinear D(T)</div><div class="ai-chip" onclick="aiChip(this)">Gray-Scott reaction-diffusion</div><div class="ai-chip" onclick="aiChip(this)">Coupled A+B to C, solve_steady</div></div>';
+  c.appendChild(w);
+}
+
+function aiAddUser(txt,imgs){
+  const c=document.getElementById('chat-box');
+  const d=document.createElement('div'); d.className='ai-msg ai-user';
+  let h='';
+  imgs.forEach(i=>{h+='<img src="data:'+i.mimeType+';base64,'+i.data+'" style="max-height:120px;border-radius:6px;margin-bottom:6px;display:block;">';});
+  if(txt) h+=aiEsc(txt);
+  d.innerHTML=h; c.appendChild(d); c.scrollTop=c.scrollHeight;
+}
+
+function aiAddBot(txt){
+  const c=document.getElementById('chat-box');
+  const d=document.createElement('div'); d.className='ai-msg ai-bot';
+  d.innerHTML=aiMd(txt); c.appendChild(d); c.scrollTop=c.scrollHeight;
+}
+
+function aiAddErr(msg){
+  const c=document.getElementById('chat-box');
+  const d=document.createElement('div'); d.className='ai-err';
+  d.textContent=msg; c.appendChild(d); c.scrollTop=c.scrollHeight;
+}
+
+function aiShowThink(){
+  const c=document.getElementById('chat-box');
+  const d=document.createElement('div'); d.className='ai-msg ai-bot ai-think'; d.id='ai-think';
+  d.innerHTML='<span></span><span></span><span></span>';
+  c.appendChild(d); c.scrollTop=c.scrollHeight;
+}
+function aiHideThink(){const el=document.getElementById('ai-think');if(el)el.remove();}
+
+function aiEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function aiHighlight(code) {
+  if (typeof hljs !== 'undefined') {
+    return hljs.highlight(code, {language:'python', ignoreIllegals:true}).value;
+  }
+  return code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function aiMd(text) {
+  const blks=[];
+  text=text.replace(/```[\w]*\n?([\s\S]*?)```/g,(_,code)=>{
+    const hi = aiHighlight(code.trimEnd());
+    blks.push('<div class="ai-cblk"><button class="ai-cpbtn" onclick="aiCp(this)">Copy</button><pre><code>'+hi+'</code></pre></div>');
+    return '\x00B'+(blks.length-1)+'\x00';
+  });
+  text=text.replace(/`([^`\n]+)`/g,(_,c)=>'<code style="font-family:monospace;background:#1e2330;padding:1px 4px;border-radius:3px;color:#8ec3ff">'+aiEsc(c)+'</code>');
+  text=text.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  text=text.replace(/^### (.+)$/gm,'<h3>$1</h3>');
+  text=text.replace(/^## (.+)$/gm,'<h2>$1</h2>');
+  text=text.replace(/^# (.+)$/gm,'<h1>$1</h1>');
+  text=text.replace(/^[-*] (.+)$/gm,'<li>$1</li>');
+  text=text.replace(/((?:<li>[^\n]*\n?)+)/g,'<ul>$1</ul>');
+  const parts=text.split(/\n\n+/);
+  text=parts.map(p=>{
+    p=p.trim(); if(!p) return '';
+    if(/^\x00B/.test(p)||p.startsWith('<h')||p.startsWith('<ul')||p.startsWith('<div')) return p;
+    return '<p>'+p.replace(/\n/g,'<br>')+'</p>';
+  }).join('\n');
+  return text.replace(/\x00B(\d+)\x00/g,(_,i)=>blks[+i]);
+}
+
+function aiCp(btn){
+  const code=btn.nextElementSibling.querySelector('code').innerText;
+  navigator.clipboard.writeText(code).then(()=>{
+    btn.textContent='Copied!'; btn.classList.add('ok');
+    setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('ok');},2000);
+  });
+}
+
+document.addEventListener('DOMContentLoaded',()=>{
+  const t=document.getElementById('ai-txt');
+  if(t){
+    t.addEventListener('input',()=>{t.style.height='auto';t.style.height=Math.min(t.scrollHeight,120)+'px';});
+    t.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();aiSend();}});
+  }
+  const cb=document.getElementById('chat-box');
+  if(cb){
+    cb.addEventListener('dragover',e=>e.preventDefault());
+    cb.addEventListener('drop',e=>{e.preventDefault();aiImgs(e.dataTransfer.files);});
+  }
+});
 </script>
 </body>
 </html>
