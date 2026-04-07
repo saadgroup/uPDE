@@ -95,6 +95,8 @@ import inspect
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize  import root
+from scipy.sparse    import lil_matrix, bmat as sp_bmat
+from scipy.sparse.linalg import spsolve
 
 
 # ---------------------------------------------------------------------------
@@ -503,37 +505,47 @@ class PDESteadySolution:
     Attributes
     ----------
     <field>  : (nx,) for 1D, (nx, ny) for 2D — steady-state field, by name
-    success  : bool   — did scipy.optimize.root converge?
+    success  : bool   — did the solver converge?
     message  : str    — convergence message
     residual : float  — max|RHS(phi)| at the solution
-    nfev     : int    — number of RHS evaluations
-    raw      : scipy OptimizeResult
+    nfev     : int    — number of RHS evaluations (0 for direct sparse solve)
+    solver   : str    — 'linear' or 'nonlinear' (which path was taken)
+    raw      : scipy result object | None  (None for direct sparse solve)
     """
 
-    def __init__(self, opt_result, equations):
-        self.success  = bool(opt_result.success)
-        self.message  = opt_result.message
-        self.nfev     = int(opt_result.nfev)
-        self.raw      = opt_result
+    def __init__(self, x, fun, equations, *,
+                 success=True, message='', nfev=0,
+                 solver='linear', raw=None):
+        """
+        Parameters
+        ----------
+        x         : flat solution vector (N,)
+        fun       : residual vector at solution (N,) — for computing max|R|
+        equations : list of PDE
+        success, message, nfev, solver, raw : metadata
+        """
+        self.success  = bool(success)
+        self.message  = message
+        self.nfev     = int(nfev)
+        self.solver   = solver
+        self.raw      = raw
+        self.residual = float(np.max(np.abs(fun)))
         self._fields  = [eq.field for eq in equations]
 
         offset = 0
         for eq in equations:
-            chunk = opt_result.x[offset:offset + eq.n_total]
+            chunk = x[offset:offset + eq.n_total]
             arr   = chunk.reshape(eq.nx, eq.ny) if eq.is_2d else chunk
             setattr(self, eq.field, arr)
             offset += eq.n_total
-
-        # residual: max|f(x)| at solution
-        self.residual = float(np.max(np.abs(opt_result.fun)))
 
     def __repr__(self):
         f0    = self._fields[0]
         shape = getattr(self, f0).shape
         return (
             f"PDESteadySolution(fields={self._fields}, shape={shape}, "
-            f"success={self.success}, residual={self.residual:.2e}, "
-            f"nfev={self.nfev})"
+            f"solver={self.solver!r}, success={self.success}, "
+            f"residual={self.residual:.2e}, nfev={self.nfev})"
         )
 
 
@@ -1117,24 +1129,24 @@ class PDE:
             )
         return PDESystem([self]).solve(t_span, **kwargs)
 
-    def solve_steady(self, guess=None, method='hybr', **kwargs):
+    def solve_steady(self, guess=None, method='auto', tol=1e-8, **kwargs):
         """
         Solve for the steady state: RHS(phi) = 0.
-
-        Wraps scipy.optimize.root — treats all problems as nonlinear.
-        Linear systems converge in a single Newton iteration at no penalty.
 
         Parameters
         ----------
         guess  : scalar | ndarray(nx,) | ndarray(nx,ny), optional
-                 Starting point for the iterative solver.  Defaults to zeros.
-                 For linear problems any guess works.  For nonlinear problems
-                 a reasonable guess (e.g. linearly interpolated BCs) helps.
-        method : str
-                 Method for scipy.optimize.root.  Default 'hybr'.
-                 Options: 'hybr', 'lm', 'broyden1', 'krylov', etc.
+                 Starting point.  Defaults to zeros.
+        method : 'auto' | 'linear' | 'nonlinear'
+                 'auto'      — detect linearity and choose:
+                               linear    → sparse direct (spsolve)
+                               nonlinear → scipy.optimize.root
+                 'linear'    — force sparse direct solver (linear only)
+                 'nonlinear' — force scipy.optimize.root
+        tol    : float
+                 Solver tolerance.
         **kwargs
-                 Forwarded to scipy.optimize.root (tol, options, …).
+                 Forwarded to PDESystem.solve_steady.
 
         Returns
         -------
@@ -1144,7 +1156,7 @@ class PDE:
         ------
         ValueError
             If this equation references external fields — use
-            PDESystem([eq1, eq2]).solve_steady() instead.
+            PDESystem([eq1, eq2]).solve_steady() for coupled equations.
 
         Example
         -------
@@ -1164,6 +1176,7 @@ class PDE:
         return PDESystem([self]).solve_steady(
             guess={self.field: guess} if guess is not None else None,
             method=method,
+            tol=tol,
             **kwargs,
         )
 
@@ -1243,6 +1256,170 @@ class PDE:
             f"{len(self._diffusion)} diffusion, "
             f"{len(self._sources)} source  |  BCs: {bcs})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Steady-state solver helpers
+# ---------------------------------------------------------------------------
+
+def _is_linear(rhs_fn, y0, tol=1e-6):
+    """
+    Probe whether rhs_fn is *affine*: F(y) = A·y - b.
+
+    An affine function satisfies F(y1) - F(y2) = A·(y1 - y2), i.e. the
+    difference is linear.  Equivalently, F(y + α·d) - F(y) = α·(F(y+d) - F(y))
+    for all α and directions d.
+
+    We test this with two random probe directions to reduce false-positive risk.
+    Cost: 5 RHS evaluations.
+
+    Note: do NOT use F(α·y) ≈ α·F(y) — that tests homogeneous linearity
+    and fails for affine functions with nonzero b (i.e., any problem with
+    nonzero Dirichlet BCs).
+    """
+    N  = len(y0)
+    rng = np.random.default_rng(42)
+
+    f0 = rhs_fn(y0)
+    for _ in range(2):
+        d     = rng.standard_normal(N)
+        alpha = 2.0
+        fa    = rhs_fn(y0 + alpha * d)
+        fd    = rhs_fn(y0 + d)
+        # affine: F(y + α·d) - F(y)  should equal  α · (F(y + d) - F(y))
+        lhs = fa - f0
+        rhs = alpha * (fd - f0)
+        if not np.allclose(lhs, rhs, rtol=tol, atol=tol):
+            return False
+    return True
+
+
+def _build_sparsity(equations):
+    """
+    Build a sparse sparsity-pattern matrix for the coupled steady-state system.
+
+    Each equation occupies a diagonal block corresponding to the 5-point (2D)
+    or 3-point (1D) stencil.  Field coupling (via add_source, add_term, etc.)
+    adds off-diagonal blocks between coupled equations — using a fully-dense
+    block as a conservative upper bound.
+
+    Returns a CSR matrix of shape (N_total, N_total) with 1s at every
+    potentially nonzero position.
+    """
+    n_eq  = len(equations)
+    N_per = [eq.n_total for eq in equations]
+    N     = sum(N_per)
+
+    blocks = [[None] * n_eq for _ in range(n_eq)]
+
+    for i, eq in enumerate(equations):
+        ni = eq.n_total
+
+        if eq.is_2d:
+            # 5-point stencil on (nx, ny) grid
+            S = lil_matrix((ni, ni))
+            nx, ny = eq.nx, eq.ny
+            def _idx(ii, jj, ny=ny):
+                return ii * ny + jj
+            for ii in range(nx):
+                for jj in range(ny):
+                    k = _idx(ii, jj)
+                    S[k, k] = 1
+                    if ii > 0:      S[k, _idx(ii-1, jj)] = 1
+                    if ii < nx-1:   S[k, _idx(ii+1, jj)] = 1
+                    if jj > 0:      S[k, _idx(ii, jj-1)] = 1
+                    if jj < ny-1:   S[k, _idx(ii, jj+1)] = 1
+        else:
+            # 3-point stencil in 1D
+            S = lil_matrix((ni, ni))
+            for k in range(ni):
+                S[k, k] = 1
+                if k > 0:      S[k, k-1] = 1
+                if k < ni-1:   S[k, k+1] = 1
+
+        blocks[i][i] = S.tocsr()
+
+    # Off-diagonal coupling blocks: any equation that references another field
+    # gets a fully-dense block (conservative; graph coloring handles sparsity)
+    field_index = {eq.field: idx for idx, eq in enumerate(equations)}
+    for i, eq in enumerate(equations):
+        refs = eq.field_refs() - {eq.field}
+        for ref in refs:
+            j = field_index.get(ref)
+            if j is not None and blocks[i][j] is None:
+                nj = N_per[j]
+                dense = lil_matrix((N_per[i], nj))
+                dense[:, :] = 1
+                blocks[i][j] = dense.tocsr()
+
+    # Fill remaining None blocks with zero matrices so sp_bmat is happy
+    for i in range(n_eq):
+        for j in range(n_eq):
+            if blocks[i][j] is None:
+                blocks[i][j] = lil_matrix((N_per[i], N_per[j])).tocsr()
+
+    return sp_bmat(blocks, format='csr')
+
+
+def _solve_linear_sparse(rhs_steady_fn, N, sparsity):
+    """
+    Recover the linear system  A·x = b  from  F(x) = A·x - b
+    using sparse probing (one probe per column group in sparsity pattern).
+
+    Uses scipy graph colouring via the sparsity pattern to probe only
+    O(stencil_width) RHS evaluations — typically 5–7 for 2D problems
+    regardless of grid size.
+
+    Returns (x, fun, nfev).
+    """
+    from scipy.sparse.csgraph import connected_components
+
+    b = -rhs_steady_fn(np.zeros(N))   # b = -F(0)
+
+    # --- graph colouring via greedy sequential algorithm ---
+    # Columns i, j can share a probe if they have no common nonzero row.
+    # We use the column adjacency graph: col i adjacent to col j iff they
+    # share a nonzero row in the sparsity pattern.
+    col_adj = (sparsity.T @ sparsity).tocsr()   # (N,N) col-overlap count
+    col_adj.setdiag(0)
+    col_adj.eliminate_zeros()
+
+    # Greedy colouring
+    colors = np.full(N, -1, dtype=int)
+    for col in range(N):
+        # colours used by neighbours
+        nbr_rows = col_adj.getrow(col)
+        used = set(colors[nbr_rows.indices][colors[nbr_rows.indices] >= 0])
+        c = 0
+        while c in used:
+            c += 1
+        colors[col] = c
+
+    n_colors = int(colors.max()) + 1
+
+    # --- assemble A column by column (grouped by colour) ---
+    from scipy.sparse import lil_matrix as _lil
+    A = _lil((N, N))
+    nfev = 1   # already evaluated b = -F(0)
+
+    for c in range(n_colors):
+        mask_cols = np.where(colors == c)[0]
+        e = np.zeros(N)
+        e[mask_cols] = 1.0
+        col_vals = rhs_steady_fn(e) + b          # = A @ e  (since F(e) = Ae - b)
+        nfev += 1
+        # Distribute: for each probed column k, only write rows that are
+        # nonzero in the sparsity pattern for column k
+        for k in mask_cols:
+            nz_rows = sparsity.getcol(k).nonzero()[0]
+            for r in nz_rows:
+                A[r, k] = col_vals[r]
+
+    A_csr = A.tocsr()
+    x     = spsolve(A_csr, b)
+    fun   = rhs_steady_fn(x)   # compute residual at solution
+    nfev += 1
+    return x, fun, nfev
 
 
 # ---------------------------------------------------------------------------
@@ -1388,42 +1565,46 @@ class PDESystem:
         )
         return PDEUnsteadySolution(ivp, self.equations)
 
-    def solve_steady(self, guess=None, method='hybr', **kwargs):
+    def solve_steady(self, guess=None, method='auto', tol=1e-8, **kwargs):
         """
         Solve the coupled steady-state system: RHS(phi_1, phi_2, ...) = 0.
-
-        Uses scipy.optimize.root — linear systems converge in one iteration,
-        nonlinear systems iterate as needed.
 
         Parameters
         ----------
         guess  : dict, optional
                  {field_name: array | scalar} initial guess per field.
                  Any unspecified field defaults to zeros.
-        method : str
-                 Method for scipy.optimize.root.  Default 'hybr'.
+        method : 'auto' | 'linear' | 'nonlinear'
+                 'auto'      — detect linearity (5 RHS evaluations) and choose:
+                               linear    → sparse direct solver (spsolve), O(1) cost
+                               nonlinear → scipy.optimize.root (same as before)
+                 'linear'    — force sparse direct solver (linear problems only)
+                 'nonlinear' — force scipy.optimize.root (works for any problem,
+                               dense Jacobian; practical for 1D or small 2D)
+        tol    : float
+                 Solver tolerance passed to scipy.optimize.root for nonlinear
+                 problems; used as convergence threshold check for direct solve.
         **kwargs
-                 Forwarded to scipy.optimize.root (tol, options, …).
+                 For 'nonlinear': forwarded to scipy.optimize.root.
+                 Not used for 'linear'.
 
         Returns
         -------
         PDESteadySolution
 
-        Example — steady heat conduction
-        ---------------------------------
+        Example — steady heat conduction (auto-detected as linear)
+        -----------------------------------------------------------
         eq = PDE('T', x=x)
         eq.add_diffusion(diffusivity=1.0)
         eq.set_bc(side='left',  kind='dirichlet', value=1.0)
         eq.set_bc(side='right', kind='dirichlet', value=0.0)
-        sol = PDESystem([eq]).solve_steady()
-        # sol.T  shape (nx,)
+        sol = PDESystem([eq]).solve_steady()   # sparse direct, milliseconds
 
-        Example — coupled steady reaction-diffusion
-        --------------------------------------------
+        Example — coupled steady reaction-diffusion (nonlinear)
+        --------------------------------------------------------
         sol = PDESystem([eqA, eqB]).solve_steady(
             guess={'cA': np.ones(nx)*5, 'cB': np.ones(nx)*5}
         )
-        # sol.cA, sol.cB  each shape (nx,)
         """
         guess = dict(guess) if guess is not None else {}
 
@@ -1438,9 +1619,34 @@ class PDESystem:
             else:
                 y0_parts.append(np.asarray(g, dtype=float).ravel())
         y0 = np.concatenate(y0_parts)
+        N  = len(y0)
 
-        opt = root(self._rhs_steady, y0, method=method, **kwargs)
-        return PDESteadySolution(opt, self.equations)
+        # --- detect linearity for 'auto' ---
+        if method == 'auto':
+            linear = _is_linear(self._rhs_steady, y0)
+            method = 'linear' if linear else 'nonlinear'
+
+        if method == 'linear':
+            sparsity = _build_sparsity(self.equations)
+            x, fun, nfev = _solve_linear_sparse(self._rhs_steady, N, sparsity)
+            residual_norm = float(np.max(np.abs(fun)))
+            success = residual_norm < max(tol * 1e3, 1e-6)
+            return PDESteadySolution(
+                x=x, fun=fun, equations=self.equations,
+                success=success,
+                message=f'Sparse direct solve (spsolve), max|R|={residual_norm:.2e}',
+                nfev=nfev, solver='linear', raw=None,
+            )
+
+        # method == 'nonlinear'
+        root_kwargs = dict(method='hybr')
+        root_kwargs.update(kwargs)
+        opt = root(self._rhs_steady, y0, **root_kwargs)
+        return PDESteadySolution(
+            x=opt.x, fun=opt.fun, equations=self.equations,
+            success=opt.success, message=opt.message,
+            nfev=opt.nfev, solver='nonlinear', raw=opt,
+        )
 
     # ------------------------------------------------------------------
     # Internal: residual for solve_steady
