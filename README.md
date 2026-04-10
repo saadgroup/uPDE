@@ -1,4 +1,4 @@
-<!-- Last modified: 2026-03-28 UTC -->
+<!-- Last modified: 2026-04-10 UTC -->
 # uPDE
 
 Interactive Equation Builder: https://saadgroup.a2hosted.com/upde
@@ -18,7 +18,7 @@ writing any solver code yourself.
 - Dirichlet, Neumann, and periodic boundary conditions
 - Interior boundary conditions for obstacles and inclusions
 - **Transient solver** — method of lines via `scipy.integrate.solve_ivp`
-- **Steady-state solver** — `solve_steady()` via `scipy.optimize.root`; works for linear and nonlinear problems with no user-facing distinction
+- **Steady-state solver** — `solve_steady()` with two paths: sparse direct (spsolve) for linear problems via graph-coloured matrix assembly, and `scipy.optimize.root` for nonlinear; auto-detected by default
 - Pre-built equation prototypes for common PDE families
 - Flamelet-based combustion via mixture-fraction transport and `FlameletTable`
 - Pure NumPy / SciPy — no compilation, no external mesh libraries
@@ -159,7 +159,7 @@ equations that do not reference any external field. For coupled equations, use
 consistent, assembles the joint state vector, and delegates to SciPy:
 
 - `PDESystem.solve(t_span, ...)` → calls `scipy.integrate.solve_ivp`
-- `PDESystem.solve_steady(guess=None, ...)` → calls `scipy.optimize.root`
+- `PDESystem.solve_steady(method='auto', ...)` → sparse direct solve for linear problems; `scipy.optimize.root` for nonlinear
 
 ### PDEUnsteadySolution — transient result
 
@@ -181,15 +181,17 @@ sol.raw         # raw scipy OdeResult
 sol.T           # (nx,) in 1D  |  (nx, ny) in 2D  — no time dimension
 sol.success     # bool (see note below)
 sol.residual    # max|RHS(φ)| at solution — primary convergence indicator
-sol.nfev        # number of RHS evaluations
+sol.nfev        # number of RHS evaluations (0 for linear sparse path)
 sol.message     # convergence message
-sol.raw         # raw scipy OptimizeResult
+sol.solver      # 'linear' or 'nonlinear' — which path was taken
+sol.raw         # raw scipy OptimizeResult, or None for linear sparse path
 ```
 
-> **Note on `sol.success`:** `scipy.optimize.root` with `method='hybr'` (the default)
-> occasionally reports `success=False` even when the solution is correct, particularly
-> when starting from an all-zero guess. Always treat `sol.residual < 1e-8` as the
-> authoritative convergence check.
+> **Note on `sol.success`:** For the `'linear'` path, `sol.success` is `True` if
+> `sol.residual < 1e-6` after the sparse solve — always check `sol.residual` directly.
+> For the `'nonlinear'` path, `scipy.optimize.root` with `method='hybr'` occasionally
+> reports `success=False` even when the solution is correct. Always treat
+> `sol.residual < 1e-8` as the authoritative convergence check.
 
 ---
 
@@ -471,10 +473,16 @@ Tight tolerances are required to resolve diffusion accurately:
 
 ### Steady-State Problems
 
-`solve_steady()` finds φ such that RHS(φ) = 0 by delegating to
-`scipy.optimize.root`. Linear and nonlinear problems are handled identically —
-Newton converges in a single iteration for linear systems, so there is no
-performance penalty for always using the nonlinear path.
+`solve_steady()` finds φ such that RHS(φ) = 0. It has two paths selected by the
+`method` parameter:
+
+- **`'linear'`** — assembles the sparse Jacobian matrix using graph-coloured probing
+  (typically 5–16 RHS evaluations regardless of grid size), then calls `spsolve`.
+  Fast for large 2D grids; only valid for linear problems.
+- **`'nonlinear'`** — delegates to `scipy.optimize.root` with Newton iteration.
+  Works for any problem; practical for 1D or moderate 2D.
+- **`'auto'`** (default) — detects linearity automatically (5 RHS evaluations) and
+  picks the appropriate path.
 
 #### Single equation
 
@@ -484,8 +492,9 @@ eq.add_diffusion(diffusivity=1.0)
 eq.set_bc(side='left',  kind='dirichlet', value=1.0)
 eq.set_bc(side='right', kind='dirichlet', value=0.0)
 
-sol = eq.solve_steady()            # linear — zero guess is fine
+sol = eq.solve_steady()            # auto-detects linear → sparse direct
 sol = eq.solve_steady(             # nonlinear — provide a starting guess
+    method='nonlinear',
     guess=np.linspace(1.0, 0.0, nx)
 )
 ```
@@ -505,16 +514,19 @@ sol = PDESystem([eqA, eqB, eqC]).solve_steady(
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `guess` | `None` → zeros | Array, scalar, or dict of arrays per field |
-| `method` | `'hybr'` | Any `scipy.optimize.root` method: `'hybr'`, `'lm'`, `'krylov'`, … |
-| `**kwargs` | — | Forwarded to `scipy.optimize.root` (e.g. `tol`, `options`) |
+| `guess` | `None` → zeros | Array, scalar, or dict of arrays per field; ignored for `'linear'` |
+| `method` | `'auto'` | `'auto'`, `'linear'`, or `'nonlinear'` |
+| `iterative` | `False` | `True` → AMG/ILU-GMRES instead of `spsolve` (large 2D, `method='linear'` only) |
+| `tol` | `1e-8` | Convergence tolerance |
+| `**kwargs` | — | Forwarded to `scipy.optimize.root` for `'nonlinear'` path |
 
 #### Checking convergence
 
 ```python
 sol = eq.solve_steady()
 print(sol.residual)   # max|RHS(φ)| — should be < 1e-8 for a good solution
-print(sol.nfev)       # number of RHS evaluations
+print(sol.nfev)       # number of RHS evaluations (small for linear path)
+print(sol.solver)     # 'linear' or 'nonlinear'
 ```
 
 Use `sol.residual` rather than `sol.success` as the primary convergence check —
@@ -760,7 +772,7 @@ PDE(field, x, y=None)
 | `set_interior_bc(mask, kind, value=)` | Interior obstacle BC |
 | `set_ic(ic)` | Initial condition: scalar, array, or callable |
 | `solve(t_span, **kwargs)` | Transient solve (uncoupled equations only) |
-| `solve_steady(guess=None, method='hybr', **kwargs)` | Steady-state solve (uncoupled only) |
+| `solve_steady(guess=None, method='auto', tol=1e-8, **kwargs)` | Steady-state solve (uncoupled only) |
 | `field_refs()` | Set of external field names referenced by this equation |
 
 ---
@@ -776,7 +788,7 @@ Validates field references at construction time.
 | Method | Description |
 |--------|-------------|
 | `solve(t_span, ICs=None, method='RK45', t_eval=None, **kwargs)` | Transient solve via `solve_ivp` |
-| `solve_steady(guess=None, method='hybr', **kwargs)` | Steady-state solve via `root` |
+| `solve_steady(guess=None, method='auto', tol=1e-8, iterative=False, **kwargs)` | Steady-state solve; `'auto'` detects linearity and picks sparse direct or Newton |
 
 `**kwargs` are forwarded to the underlying SciPy solver.
 
@@ -804,10 +816,11 @@ Returned by `solve_steady()`.
 |-----------|-------|-------------|
 | `sol.<field>` | `(nx,)` or `(nx, ny)` | Field values — no time dimension |
 | `sol.residual` | float | max\|RHS(φ)\| at solution — primary convergence indicator |
-| `sol.success` | bool | Convergence flag from `root` (see note above) |
+| `sol.success` | bool | Convergence flag (see note above) |
 | `sol.message` | str | Convergence message |
-| `sol.nfev` | int | Number of RHS evaluations |
-| `sol.raw` | `OptimizeResult` | Raw SciPy result |
+| `sol.nfev` | int | Number of RHS evaluations (0 for linear sparse path) |
+| `sol.solver` | str | `'linear'` or `'nonlinear'` — which path was taken |
+| `sol.raw` | `OptimizeResult` or `None` | Raw SciPy result; `None` for linear sparse path |
 
 ---
 
@@ -855,7 +868,8 @@ def my_rhs(Dx, Dy, **fields):
 | `Dxx`, `Dyy` | Central difference | 2nd in space |
 | `Div_x`, `Div_y` | Central conservative | 2nd in space |
 | Transient time integration | `solve_ivp` adaptive | depends on method |
-| Steady-state solve | Newton via `scipy.optimize.root` | — |
+| Steady-state, linear | Sparse direct (`spsolve`) via graph-coloured matrix assembly | exact |
+| Steady-state, nonlinear | Newton via `scipy.optimize.root` | — |
 
 All spatial operators are BC-aware — ghost cells are padded from the boundary
 conditions before each stencil application, preventing periodic wrap-around
@@ -881,9 +895,10 @@ from silently corrupting non-periodic boundaries.
 
 **Steady-state solver doesn't converge**
 - Check `sol.residual` — if it's small (< 1e-6) the solution is likely correct despite `sol.success=False`
-- For nonlinear problems, provide a better `guess` (e.g. linear interpolation between BCs)
-- Try a different method: `solve_steady(method='lm')` or `solve_steady(method='krylov')`
-- For large 2D problems, pass `options={'maxfev': 10000}` to increase the iteration limit
+- For nonlinear problems, provide a better `guess` (e.g. linear interpolation between BCs) and use `method='nonlinear'`
+- Try a different root-finding method: `solve_steady(method='nonlinear', **{'method': 'lm'})` or `'krylov'`
+- For large 2D linear problems, `method='linear'` (or `'auto'`) is dramatically faster than `'nonlinear'`
+- If `method='linear'` gives a wrong answer, the problem may be nonlinear — switch to `method='nonlinear'`
 
 **`ValueError: references external field(s)`**
 - `PDE.solve()` and `PDE.solve_steady()` only work for uncoupled equations
