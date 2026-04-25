@@ -94,7 +94,7 @@ Example — 1D coupled reaction-diffusion
 import inspect
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize  import root
+
 from scipy.sparse    import lil_matrix, bmat as sp_bmat
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -831,6 +831,20 @@ class PDE:
 
         Notes
         -----
+        **Time-varying Dirichlet BCs:** when ``value`` is a callable ``g(t)``,
+        the RHS at boundary nodes is set to ``dg/dt``, computed via a forward
+        finite difference with step ``h = 1e-8``.
+        This is accurate for smooth functions.
+        For *discontinuous* boundary conditions (e.g. a step change at some
+        time ``t0``), no finite-difference scheme can represent the resulting
+        delta in ``dg/dt``, and neither can ``scipy.integrate.solve_ivp``
+        integrate across a discontinuity without intervention.
+        The correct approach is to split the integration at the discontinuity::
+
+            sol1 = eq.solve(t_span=(0, t0))
+            sol2 = eq.solve(t_span=(t0, t_end),
+                            ICs={'T': sol1.T[:, -1]})
+
         **Override semantics:** registering a new BC for a named side
         automatically removes any previously registered BC for that same side,
         so later calls cleanly override earlier ones::
@@ -1142,9 +1156,9 @@ class PDE:
         method : 'auto' | 'linear' | 'nonlinear'
                  'auto'      — detect linearity and choose:
                                linear    → sparse direct (spsolve)
-                               nonlinear → scipy.optimize.root
+                               nonlinear → sparse Newton (spsolve at each step)
                  'linear'    — force sparse direct solver (linear only)
-                 'nonlinear' — force scipy.optimize.root
+                 'nonlinear' — force sparse Newton solver
         tol    : float
                  Solver tolerance.
         **kwargs
@@ -1479,6 +1493,134 @@ def _solve_linear_sparse(rhs_steady_fn, N, sparsity, iterative=False):
     return x, fun, nfev
 
 
+def _assemble_jacobian_sparse(rhs_fn, y, sparsity, eps=1e-7):
+    """
+    Assemble the sparse Jacobian  J = dR/dy  at point y using
+    finite-difference colouring.
+
+    Uses the same greedy graph-colouring + probing strategy as
+    _solve_linear_sparse, but probes the nonlinear residual R(y)
+    rather than a linear operator.
+
+    Returns (J_csr, nfev).
+    """
+    N      = len(y)
+    R0     = rhs_fn(y)
+    nfev   = 1
+
+    # ── Graph colouring (identical to _solve_linear_sparse) ──────────────────
+    col_adj = (sparsity.T @ sparsity).tocsr()
+    col_adj.setdiag(0)
+    col_adj.eliminate_zeros()
+
+    colors  = np.full(N, -1, dtype=np.int32)
+    max_deg = int(np.diff(col_adj.indptr).max()) if N > 0 else 0
+    used_buf = np.zeros(max_deg + 2, dtype=bool)
+
+    for col in range(N):
+        start, end = col_adj.indptr[col], col_adj.indptr[col + 1]
+        nbr_colors = colors[col_adj.indices[start:end]]
+        nbr_colors = nbr_colors[nbr_colors >= 0]
+        if len(nbr_colors):
+            n_needed = int(nbr_colors.max()) + 2
+            if n_needed > len(used_buf):
+                used_buf = np.zeros(n_needed, dtype=bool)
+            else:
+                used_buf[:n_needed] = False
+            used_buf[nbr_colors] = True
+            c = int(np.argmin(used_buf[:n_needed]))
+        else:
+            c = 0
+        colors[col] = c
+
+    n_colors = int(colors.max()) + 1
+
+    # ── Probe and assemble J ──────────────────────────────────────────────────
+    sp_csc   = sparsity.tocsc()
+    all_rows = []
+    all_cols = []
+    all_vals = []
+
+    for c in range(n_colors):
+        mask_cols = np.where(colors == c)[0]
+        e         = np.zeros(N)
+        e[mask_cols] = eps
+        dR = (rhs_fn(y + e) - R0) / eps   # forward difference column group
+        nfev += 1
+        for k in mask_cols:
+            r_start = sp_csc.indptr[k]
+            r_end   = sp_csc.indptr[k + 1]
+            nz_rows = sp_csc.indices[r_start:r_end]
+            all_rows.append(nz_rows)
+            all_cols.append(np.full(len(nz_rows), k, dtype=np.int32))
+            all_vals.append(dR[nz_rows])
+
+    all_rows = np.concatenate(all_rows)
+    all_cols = np.concatenate(all_cols)
+    all_vals = np.concatenate(all_vals)
+
+    import scipy.sparse as _sp
+    J = _sp.csr_matrix((all_vals, (all_rows, all_cols)), shape=(N, N))
+    return J, R0, nfev
+
+
+def _solve_nonlinear_sparse(rhs_fn, y0, sparsity, tol=1e-8, maxiter=50):
+    """
+    Sparse Newton solver for  R(y) = 0.
+
+    At each iteration:
+        J · Δy = -R(y)              (sparse linear solve via spsolve)
+        y  ←  y + alpha * Δy       (backtracking line search on alpha)
+
+    The Jacobian J is assembled each iteration using finite-difference
+    colouring — O(n_colors) RHS evaluations, typically 5–7 for a
+    5-point stencil regardless of grid size.
+
+    The backtracking line search halves alpha up to 10 times until the
+    residual decreases, ensuring global convergence for well-posed problems.
+    It adds negligible overhead for well-conditioned problems where alpha=1
+    is accepted immediately.
+
+    Returns (y, R_final, nfev, success, message).
+    """
+    y    = y0.copy()
+    nfev = 0
+
+    for k in range(maxiter):
+        J, R, n = _assemble_jacobian_sparse(rhs_fn, y, sparsity)
+        nfev += n
+
+        norm = float(np.max(np.abs(R)))
+        if norm < tol:
+            return y, R, nfev, True, f'Sparse Newton converged in {k} iterations, max|R|={norm:.2e}'
+
+        try:
+            dy = spsolve(J, -R)
+        except Exception as e:
+            return y, R, nfev, False, f'Sparse Newton: spsolve failed at iteration {k}: {e}'
+
+        if not np.all(np.isfinite(dy)):
+            return y, R, nfev, False, f'Sparse Newton: non-finite step at iteration {k}'
+
+        # Backtracking line search: halve alpha until residual decreases
+        alpha = 1.0
+        for _ in range(10):
+            y_new = y + alpha * dy
+            R_new = rhs_fn(y_new); nfev += 1
+            if np.max(np.abs(R_new)) < norm:
+                break
+            alpha *= 0.5
+        y = y_new
+
+    R    = rhs_fn(y)
+    nfev += 1
+    norm = float(np.max(np.abs(R)))
+    success = norm < tol
+    msg = (f'Sparse Newton {"converged" if success else "did NOT converge"} '
+           f'after {maxiter} iterations, max|R|={norm:.2e}')
+    return y, R, nfev, success, msg
+
+
 # ---------------------------------------------------------------------------
 # PDESystem — couples PDE descriptors and owns the solver
 # ---------------------------------------------------------------------------
@@ -1486,6 +1628,26 @@ def _solve_linear_sparse(rhs_steady_fn, N, sparsity, iterative=False):
 class PDESystem:
     """
     Couple a list of PDE descriptors into a solvable system.
+
+    PDESystem owns the time integration and steady-state solve.  It is the
+    only object in uPDE that calls scipy solvers directly.
+
+    State vector layout
+    -------------------
+    All fields are concatenated into a single flat array ``y`` of length
+    ``sum(eq.n_total for eq in equations)``.  The fields appear in the order
+    they were passed to the constructor::
+
+        y = [phi_0.ravel(), phi_1.ravel(), ..., phi_k.ravel()]
+
+    For 1D equations ``phi_i`` has shape ``(nx,)``.
+    For 2D equations ``phi_i`` has shape ``(nx, ny)`` and is stored in
+    row-major (C) order: index ``i*ny + j`` corresponds to grid point
+    ``(x[i], y[j])``.
+
+    This layout is used consistently by ``_rhs``, ``_rhs_steady``,
+    ``PDEUnsteadySolution``, and ``PDESteadySolution``.  Any extension that
+    adds a new solver path must respect the same convention.
 
     Parameters
     ----------
@@ -1616,6 +1778,15 @@ class PDESystem:
             ICs[eq.field] = ic_2d.ravel()
 
         y0  = np.concatenate([ICs[f] for f in self.fields])
+
+        # For implicit methods (BDF, Radau, LSODA) automatically supply the
+        # sparsity pattern so scipy uses finite-difference Jacobian colouring
+        # instead of a dense O(N^2) finite-difference Jacobian.
+        # Users can override by passing jac_sparsity=... explicitly.
+        _implicit = {'BDF', 'Radau', 'LSODA'}
+        if method in _implicit and 'jac_sparsity' not in kwargs:
+            kwargs['jac_sparsity'] = _build_sparsity(self.equations)
+
         ivp = solve_ivp(
             self._rhs, t_span, y0,
             method=method, t_eval=t_eval, **kwargs
@@ -1633,11 +1804,14 @@ class PDESystem:
                  Any unspecified field defaults to zeros.
         method : 'auto' | 'linear' | 'nonlinear'
                  'auto'      — detect linearity (5 RHS evaluations) and choose:
-                               linear    → sparse solver, O(1) RHS evaluations
-                               nonlinear → scipy.optimize.root (same as before)
-                 'linear'    — force sparse solver (linear problems only)
-                 'nonlinear' — force scipy.optimize.root (works for any problem,
-                               dense Jacobian; practical for 1D or small 2D)
+                               linear    → sparse direct solver, O(1) RHS evaluations
+                               nonlinear → sparse Newton (Jacobian via coloured
+                                           finite differences + spsolve per step)
+                 'linear'    — force sparse direct solver (linear problems only)
+                 'nonlinear' — force sparse Newton solver.  Assembles the
+                               Jacobian using the known sparsity pattern — O(n_colors)
+                               RHS evaluations per Newton step regardless of N.
+                               Practical for arbitrarily large 1D and 2D grids.
         iterative : bool
                  Only used when method='linear'.
                  False (default) — spsolve (direct sparse LU).  Fast for small/
@@ -1647,8 +1821,10 @@ class PDESystem:
                                    Recommended for large 2D grids (>100×100).
         tol    : float
                  Solver tolerance.  Default 1e-8.
+        maxiter : int
+                 Maximum Newton iterations for method='nonlinear'.  Default 50.
         **kwargs
-                 For 'nonlinear': forwarded to scipy.optimize.root.
+                 Reserved for future use.
 
         Returns
         -------
@@ -1704,27 +1880,50 @@ class PDESystem:
                 nfev=nfev, solver='linear', raw=None,
             )
 
-        # method == 'nonlinear'
-        root_kwargs = dict(method='hybr')
-        root_kwargs.update(kwargs)
-        opt = root(self._rhs_steady, y0, **root_kwargs)
+        # method == 'nonlinear' — sparse Newton
+        sparsity = _build_sparsity(self.equations)
+        maxiter  = kwargs.pop('maxiter', 50)
+        y0_frozen = y0.copy()   # capture initial guess for interior Neumann pins
+        def rhs_steady_with_frozen(y):
+            return self._rhs_steady(y, y0_frozen=y0_frozen)
+        x, fun, nfev, success, message = _solve_nonlinear_sparse(
+            rhs_steady_with_frozen, y0, sparsity, tol=tol, maxiter=maxiter
+        )
         return PDESteadySolution(
-            x=opt.x, fun=opt.fun, equations=self.equations,
-            success=opt.success, message=opt.message,
-            nfev=opt.nfev, solver='nonlinear', raw=opt,
+            x=x, fun=fun, equations=self.equations,
+            success=success, message=message,
+            nfev=nfev, solver='nonlinear', raw=None,
         )
 
     # ------------------------------------------------------------------
     # Internal: residual for solve_steady
     # ------------------------------------------------------------------
 
-    def _rhs_steady(self, y):
+    def _rhs_steady(self, y, y0_frozen=None):
         """
-        Residual for scipy.optimize.root: R(y) = 0 at steady state.
+        Residual function for the steady-state solver: R(y) = 0 at steady state.
 
-        Identical to _rhs(t=0, y) except that Dirichlet BC nodes use the
-        residual form  phi[mask] - value = 0  so the optimizer correctly
-        pins those degrees of freedom.
+        Almost identical to ``_rhs(t=0, y)`` but with one critical difference
+        in how Dirichlet boundary conditions are enforced.
+
+        In the transient solver, Dirichlet BC nodes have their RHS set to
+        ``dvalue/dt`` (zero for constant BCs).  This works because solve_ivp
+        evolves the state forward in time and the BC node never drifts from
+        its prescribed value.
+
+        In the steady-state solver, the optimizer is free to move *any* DOF
+        including BC nodes.  Setting ``R[mask] = 0`` (i.e. ``dvalue/dt = 0``)
+        would make the BC rows trivially satisfied for *any* value of phi,
+        leaving those DOFs unconstrained.  Instead we use the residual form::
+
+            R[mask] = phi[mask] - value = 0
+
+        which explicitly pins the BC nodes to their prescribed values and gives
+        the optimizer a non-trivial equation to satisfy there.
+
+        Interior Neumann nodes are frozen to their initial-guess values via
+        ``R[mask] = phi[mask] - y0_frozen[mask]``, giving a unit diagonal in
+        the Jacobian and leaving those DOFs unchanged during Newton iteration.
         """
         # Re-use transient _rhs machinery at t=0 to get stencil contributions
         rhs_flat = self._rhs(0.0, y)
@@ -1751,6 +1950,17 @@ class PDESystem:
                     if val is None:
                         val = 0.0
                     rhs[ibc.mask] = phi[ibc.mask] - val
+                elif ibc.kind == 'neumann':
+                    # Interior Neumann nodes are frozen in the transient solver
+                    # (RHS=0). In the steady solver this gives zero Jacobian rows
+                    # making the system singular. Pin to initial-guess values so
+                    # the Jacobian sees a unit diagonal and Newton leaves them fixed.
+                    if y0_frozen is not None:
+                        frozen_chunk = y0_frozen[offset:offset + eq.n_total]
+                        frozen_phi   = frozen_chunk.reshape(phi.shape)
+                        rhs[ibc.mask] = phi[ibc.mask] - frozen_phi[ibc.mask]
+                    else:
+                        rhs[ibc.mask] = 0.0
 
             rhs_flat[offset:offset + eq.n_total] = rhs.ravel()
             offset += eq.n_total
@@ -1760,7 +1970,39 @@ class PDESystem:
     # ------------------------------------------------------------------
 
     def _rhs(self, t, y):
-        # Unpack flat y into per-field arrays (2D or 1D)
+        """
+        Evaluate the coupled RHS for scipy.integrate.solve_ivp: dy/dt = F(t, y).
+
+        This is the core of the method-of-lines assembly.  The steps are:
+
+        1. **Unpack** the flat state vector ``y`` into per-field shaped arrays
+           (``(nx,)`` for 1D, ``(nx, ny)`` for 2D).  Two copies are kept:
+           ``fields_flat`` (flat, for slicing back into ``y``) and
+           ``fields_nd`` (shaped, for passing to stencil functions and
+           user callables).
+
+        2. **Assemble** the spatial RHS for each equation by evaluating every
+           registered term (advection, diffusion, source, flux, add_term) using
+           the current fields and BC-aware stencil functions.  All operators
+           receive shaped arrays; the result accumulates into ``rhs_nd``.
+
+        3. **Apply BCs** via ``_apply_bcs``: Dirichlet nodes have their RHS
+           replaced by ``dvalue/dt`` (zero for constant BCs, finite-differenced
+           for callable BCs); Neumann nodes are corrected for the non-periodic
+           ghost cell.
+
+        4. **Repack** the shaped RHS arrays back into a single flat array and
+           return it to solve_ivp.
+
+        Parameters
+        ----------
+        t : float        current solver time
+        y : (N,) array   flat state vector (see class docstring for layout)
+
+        Returns
+        -------
+        dydt : (N,) array   flat RHS vector, same layout as y
+        """
         fields_flat = {}   # flat  (n_total,)
         fields_nd   = {}   # shaped (nx,) or (nx,ny)
         offset = 0
