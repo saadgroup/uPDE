@@ -11,6 +11,9 @@ data — and delegates the hard work to SciPy. Transient problems go to
 You get adaptive time-stepping, stiffness detection, and Newton iteration without
 writing any solver code yourself.
 
+Paper: https://www.sciencedirect.com/science/article/pii/S2352711026002074
+Cite As: Saad, T. (2026). uPDE: A Python library for solving systems of nonlinear partial differential equations. SoftwareX, 34, 102715. https://doi.org/10.1016/j.softx.2026.102715
+
 **Features:**
 - 1D and 2D problems on uniform Cartesian grids
 - Coupled multi-field systems
