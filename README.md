@@ -12,6 +12,7 @@ You get adaptive time-stepping, stiffness detection, and Newton iteration withou
 writing any solver code yourself.
 
 Paper: https://www.sciencedirect.com/science/article/pii/S2352711026002074
+
 Cite As: Saad, T. (2026). uPDE: A Python library for solving systems of nonlinear partial differential equations. SoftwareX, 34, 102715. https://doi.org/10.1016/j.softx.2026.102715
 
 **Features:**
