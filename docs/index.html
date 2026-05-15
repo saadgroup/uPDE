@@ -1,242 +1,979 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>uPDE — you too can solve PDEs</title>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['$','$'],['\\(','\\)']], displayMath: [['$$','$$'],['\\[','\\]']] },
+  options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] }
+};
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-chtml.min.js"></script>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+/* ─── Reset & base ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
-    background: #0a0a0f;
-    color: #fff;
-    font-family: system-ui, sans-serif;
-    height: 100vh;
-    overflow: hidden;
-    user-select: none;
-  }
+:root {
+  --bg:       #0A0A0F;
+  --bg2:      #12121E;
+  --bg3:      #1A1A2E;
+  --purple:   #7C6FFF;
+  --teal:     #00C9B1;
+  --amber:    #F4A942;
+  --pink:     #FF8096;
+  --blue:     #5BA4FF;
+  --white:    #FFFFFF;
+  --w80:      rgba(255,255,255,0.80);
+  --w60:      rgba(255,255,255,0.60);
+  --w35:      rgba(255,255,255,0.35);
+  --w12:      rgba(255,255,255,0.12);
+  --w06:      rgba(255,255,255,0.06);
+  --mono:     'Courier New', Courier, monospace;
+  --serif:    Georgia, 'Times New Roman', serif;
+}
 
-  #viewer {
-    width: 100vw;
-    height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;
-  }
+html { scroll-behavior: smooth; background: var(--bg); }
+body { font-family: var(--serif); background: var(--bg); color: var(--w80); overflow-x: hidden; }
 
-  #slide {
-    max-width: 100vw;
-    max-height: 100vh;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-    display: block;
-  }
+/* ─── Slide wrapper ─────────────────────────────────────────────── */
+.slide {
+  width: 100%;
+  min-height: 100vh;
+  padding: 48px 64px;
+  border-bottom: 1px solid var(--w12);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 
-  /* nav arrows */
-  .arrow {
-    position: fixed;
-    top: 50%;
-    transform: translateY(-50%);
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.15);
-    color: #fff;
-    width: 44px; height: 44px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1.2rem;
-    cursor: pointer;
-    transition: background 0.15s, opacity 0.15s;
-    z-index: 10;
-  }
-  .arrow:hover { background: rgba(255,255,255,0.18); }
-  .arrow.disabled { opacity: 0.15; pointer-events: none; }
-  #prev { left: 16px; }
-  #next { right: 16px; }
+/* grid texture */
+.slide::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(124,111,255,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(124,111,255,0.035) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+}
 
-  /* counter */
-  #counter {
-    position: fixed;
-    bottom: 16px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(0,0,0,0.5);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 999px;
-    padding: 4px 14px;
-    font-size: 0.8rem;
-    color: rgba(255,255,255,0.5);
-    letter-spacing: 0.05em;
-    z-index: 10;
-  }
+/* ─── Glow blobs ────────────────────────────────────────────────── */
+.glow-tl { position: absolute; top: -100px; left: -100px; width: 400px; height: 400px;
+  background: radial-gradient(circle, rgba(124,111,255,0.15) 0%, transparent 70%); pointer-events: none; }
+.glow-br { position: absolute; bottom: -80px; right: -80px; width: 350px; height: 350px;
+  background: radial-gradient(circle, rgba(0,201,177,0.10) 0%, transparent 70%); pointer-events: none; }
 
-  /* pip badge */
-  #pip {
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    background: rgba(0,0,0,0.55);
-    border: 1px solid rgba(0,201,177,0.4);
-    border-radius: 8px;
-    padding: 6px 14px;
-    font-family: monospace;
-    font-size: 0.8rem;
-    color: #00C9B1;
-    cursor: pointer;
-    z-index: 10;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  #pip:hover { background: rgba(0,201,177,0.1); border-color: #00C9B1; }
-  #pip.copied { color: #F4A942; border-color: rgba(244,169,66,0.4); }
+/* ─── Navigation dots ───────────────────────────────────────────── */
+#nav {
+  position: fixed; right: 20px; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: 10px; z-index: 100;
+}
+.nav-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--w35); border: none; cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+}
+.nav-dot:hover, .nav-dot.active { background: var(--purple); transform: scale(1.4); }
 
-  /* github link */
-  #ghlink {
-    position: fixed;
-    top: 16px;
-    left: 16px;
-    background: rgba(0,0,0,0.55);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 8px;
-    padding: 6px 14px;
-    font-size: 0.8rem;
-    color: rgba(255,255,255,0.6);
-    text-decoration: none;
-    z-index: 10;
-    transition: background 0.15s;
-  }
-  #ghlink:hover { background: rgba(255,255,255,0.08); color: #fff; }
+/* ─── Typography ────────────────────────────────────────────────── */
+.slide-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--purple); margin-bottom: 6px;
+}
+.slide-title {
+  font-size: clamp(28px, 4vw, 52px); font-weight: 700;
+  color: var(--white); line-height: 1.1; margin-bottom: 8px;
+}
+.slide-title span { color: var(--purple); }
+.accent-bar {
+  width: 48px; height: 3px;
+  background: linear-gradient(90deg, var(--purple), var(--teal));
+  border-radius: 2px; margin: 12px 0 20px;
+}
+.eq-box {
+  background: var(--bg3); border: 1px solid var(--w12);
+  border-left: 3px solid var(--teal);
+  padding: 14px 20px; border-radius: 8px;
+  font-size: clamp(13px, 1.6vw, 17px);
+  color: var(--w80); margin-bottom: 10px;
+  line-height: 1.6;
+}
+.eq-system {
+  background: var(--bg3); border: 1px solid var(--w12);
+  border-left: 3px solid var(--teal);
+  padding: 16px 24px; border-radius: 8px;
+  margin-bottom: 14px;
+}
+.eq-system p { margin: 6px 0; font-size: clamp(12px,1.4vw,16px); color: var(--w80); }
 
-  /* dot indicators */
-  #dots {
-    position: fixed;
-    bottom: 48px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 6px;
-    z-index: 10;
-  }
-  .dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.2);
-    cursor: pointer;
-    transition: background 0.2s, transform 0.2s;
-  }
-  .dot.active {
-    background: #7C6FFF;
-    transform: scale(1.4);
-  }
+/* ─── Code blocks ───────────────────────────────────────────────── */
+pre {
+  background: #0D0D18; border: 1px solid var(--w12); border-radius: 8px;
+  padding: 16px 20px; font-family: var(--mono); font-size: clamp(10px,1.1vw,13px);
+  line-height: 1.65; overflow-x: auto; color: #CDD6F4;
+}
+.kw  { color: #CBA6F7; } /* purple - keywords */
+.fn  { color: #89B4FA; } /* blue - functions/methods */
+.str { color: #A6E3A1; } /* green - strings */
+.num { color: #FAB387; } /* orange - numbers */
+.cmt { color: #585B70; font-style: italic; }
+.var { color: #89DCEB; } /* cyan - variables */
 
-  /* hint */
-  #hint {
-    position: fixed;
-    bottom: 90px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(124,111,255,0.25);
-    border: 1px solid rgba(124,111,255,0.6);
-    border-radius: 999px;
-    padding: 10px 24px;
-    font-size: 0.9rem;
-    color: #fff;
-    white-space: nowrap;
-    z-index: 10;
-    transition: opacity 1.5s ease;
-  }
-  #hint.hidden { opacity: 0; pointer-events: none; }
+/* ─── Step badges ───────────────────────────────────────────────── */
+.step-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%;
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  margin-right: 8px; flex-shrink: 0;
+}
+.step1 { background: var(--purple); color: var(--white); }
+.step2 { background: var(--teal);   color: var(--bg); }
+.step3 { background: var(--amber);  color: var(--bg); }
+
+.step-heading {
+  display: flex; align-items: center;
+  font-size: clamp(14px,1.8vw,20px); font-weight: 700;
+  margin-bottom: 8px;
+}
+.step-heading.s1 { color: var(--purple); }
+.step-heading.s2 { color: var(--teal); }
+.step-heading.s3 { color: var(--amber); }
+
+/* ─── Figure placeholder ────────────────────────────────────────── */
+.fig-placeholder {
+  background: var(--bg3); border: 1px dashed rgba(124,111,255,0.35);
+  border-radius: 10px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; color: var(--w35);
+  font-family: var(--mono); font-size: 11px; text-align: center;
+  padding: 12px; gap: 6px;
+}
+.fig-placeholder svg { opacity: 0.3; }
+
+/* image when provided — use class="fig" on <img> */
+img.fig { width: 100%; height: 100%; object-fit: contain; border-radius: 10px; display: block; }
+
+/* ─── Feature cards (hero slide) ────────────────────────────────── */
+.feat-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 12px; margin-top: 24px;
+}
+.feat-card {
+  background: var(--bg2); border: 1px solid var(--w06);
+  border-radius: 10px; padding: 16px; position: relative; overflow: hidden;
+}
+.feat-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0;
+  height: 2px;
+}
+.feat-card.c-purple::before { background: linear-gradient(90deg, var(--purple), transparent); }
+.feat-card.c-teal::before   { background: linear-gradient(90deg, var(--teal), transparent); }
+.feat-card.c-amber::before  { background: linear-gradient(90deg, var(--amber), transparent); }
+.feat-card.c-pink::before   { background: linear-gradient(90deg, var(--pink), transparent); }
+.feat-card.c-blue::before   { background: linear-gradient(90deg, var(--blue), transparent); }
+
+.feat-icon { font-size: 18px; margin-bottom: 8px; }
+.feat-title { font-size: 13px; font-weight: 700; color: var(--white); margin-bottom: 4px; }
+.feat-desc  { font-size: 11px; color: var(--w60); line-height: 1.5; font-family: var(--mono); }
+
+/* ─── Positioning chart ─────────────────────────────────────────── */
+#posChart { width: 100%; max-width: 380px; aspect-ratio: 1; }
+
+/* ─── Tag badge ─────────────────────────────────────────────────── */
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 9px;
+  letter-spacing: 0.15em; text-transform: uppercase;
+  border-radius: 3px; padding: 3px 8px;
+}
+.tag-purple { background: rgba(124,111,255,0.15); color: var(--purple); border: 1px solid rgba(124,111,255,0.3); }
+.tag-teal   { background: rgba(0,201,177,0.12);   color: var(--teal);   border: 1px solid rgba(0,201,177,0.3); }
+.tag-amber  { background: rgba(244,169,66,0.12);  color: var(--amber);  border: 1px solid rgba(244,169,66,0.3); }
+
+/* ─── Layout helpers ────────────────────────────────────────────── */
+.cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
+.cols-55-45 { display: grid; grid-template-columns: 55fr 45fr; gap: 24px; }
+.cols-45-55 { display: grid; grid-template-columns: 45fr 55fr; gap: 24px; }
+.cols-60-40 { display: grid; grid-template-columns: 60fr 40fr; gap: 24px; }
+.flex-col { display: flex; flex-direction: column; gap: 10px; }
+.gap-4 { display: flex; flex-direction: column; gap: 4px; }
+.mt8  { margin-top: 8px; }
+.mt16 { margin-top: 16px; }
+.small-text { font-size: 11px; color: var(--w60); font-family: var(--mono); }
+.footer {
+  margin-top: auto; padding-top: 16px;
+  font-family: var(--mono); font-size: 10px; color: var(--w35);
+  display: flex; justify-content: space-between; align-items: center;
+  border-top: 1px solid var(--w06);
+}
+.footer a { color: var(--purple); text-decoration: none; }
+
+/* ─── Slide-specific helpers ────────────────────────────────────── */
+.col-block { display: flex; flex-direction: column; gap: 10px; }
 </style>
 </head>
 <body>
 
-<a id="ghlink" href="https://github.com/saadgroup/upde">⭐ GitHub</a>
-<div id="pip" onclick="copyPip()">$ pip install upde</div>
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 1 — HERO
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s1">
+<div class="glow-tl"></div>
+<div class="glow-br"></div>
 
-<div id="viewer">
-  <img id="slide" src="" alt="uPDE slide">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:40px;flex:1;align-items:center;">
+
+  <!-- Left: branding + positioning chart -->
+  <div style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-label">github.com/saadgroup/upde</div>
+    <div style="font-size:clamp(56px,9vw,100px);font-weight:900;color:var(--white);letter-spacing:-4px;line-height:0.9;">uPDE</div>
+    <div style="font-family:var(--mono);font-size:clamp(11px,1.5vw,16px);color:var(--teal);letter-spacing:0.12em;">you too can solve PDEs</div>
+    <div class="accent-bar"></div>
+    <p style="font-size:clamp(13px,1.6vw,17px);color:var(--w60);line-height:1.7;font-style:italic;">
+      Describe your PDE the way you write it.<br>uPDE handles the rest.
+    </p>
+    <p style="font-size:clamp(12px,1.4vw,15px);color:var(--w60);line-height:1.7;">
+      uPDE is an expressive Python library designed to solve systems of coupled nonlinear PDEs.
+      It targets physics-focused users — those who want control of their PDE models without
+      worrying about discretization and time integration.
+    </p>
+
+    <!-- Positioning chart -->
+    <div style="margin-top:8px;">
+      <canvas id="posChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Right: 3-step summary + feature grid -->
+  <div style="display:flex;flex-direction:column;gap:16px;">
+    <div style="font-size:clamp(18px,2.5vw,28px);font-weight:700;color:var(--white);">Solve PDEs in 3 Steps</div>
+
+    <!-- Step cards -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+      <div style="background:rgba(124,111,255,0.10);border:1px solid rgba(124,111,255,0.25);border-radius:8px;padding:12px;">
+        <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+        <pre style="font-size:10px;padding:8px;"><span class="var">x</span> = np.linspace(<span class="num">0</span>,<span class="num">1</span>,<span class="num">100</span>)
+<span class="var">eq</span> = upde.PDE(<span class="str">'u'</span>, x)
+eq.add_advection(<span class="num">1.0</span>)
+eq.add_diffusion(<span class="num">0.01</span>)</pre>
+      </div>
+      <div style="background:rgba(0,201,177,0.08);border:1px solid rgba(0,201,177,0.25);border-radius:8px;padding:12px;">
+        <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+        <pre style="font-size:10px;padding:8px;"><span class="kw">def</span> <span class="fn">gaussian</span>(x):
+  <span class="kw">return</span> np.exp(...)
+eq.set_ic(gaussian)
+eq.set_bc(kind=<span class="str">'periodic'</span>)</pre>
+      </div>
+      <div style="background:rgba(244,169,66,0.08);border:1px solid rgba(244,169,66,0.25);border-radius:8px;padding:12px;">
+        <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+        <pre style="font-size:10px;padding:8px;"><span class="var">sol</span> = eq.solve(
+  t_span=(<span class="num">0</span>, <span class="num">1</span>)
+)
+<span class="cmt"># sol.T: (nx, nt)</span></pre>
+      </div>
+    </div>
+
+    <!-- Feature grid -->
+    <div class="feat-grid" style="grid-template-columns:repeat(3,1fr);gap:8px;">
+      <div class="feat-card c-purple">
+        <div class="feat-icon">⏱</div>
+        <div class="feat-title">Steady &amp; unsteady</div>
+        <div class="feat-desc">Time-marching or direct steady-state with a single switch</div>
+      </div>
+      <div class="feat-card c-amber">
+        <div class="feat-icon">Δt</div>
+        <div class="feat-title">Adaptive timestep</div>
+        <div class="feat-desc">scipy solve_ivp handles step size, error estimation, stiffness</div>
+      </div>
+      <div class="feat-card c-teal">
+        <div class="feat-icon">⊞</div>
+        <div class="feat-title">1D &amp; 2D — same API</div>
+        <div class="feat-desc">Pass y= to go 2D. Code stays identical.</div>
+      </div>
+      <div class="feat-card c-pink">
+        <div class="feat-icon">⇌</div>
+        <div class="feat-title">Coupled systems</div>
+        <div class="feat-desc">PDESystem([eq1, eq2, ...]) with zero boilerplate</div>
+      </div>
+      <div class="feat-card c-blue">
+        <div class="feat-icon">∂Ω</div>
+        <div class="feat-title">Flexible BCs</div>
+        <div class="feat-desc">Dirichlet, Neumann &amp; periodic. One call, any combination.</div>
+      </div>
+      <div class="feat-card c-purple">
+        <div class="feat-icon">ƒ</div>
+        <div class="feat-title">Callable coefs</div>
+        <div class="feat-desc">Spatially- &amp; time-varying. Signature-injected automatically.</div>
+      </div>
+    </div>
+  </div>
 </div>
 
-<button class="arrow disabled" id="prev" onclick="go(-1)">&#8592;</button>
-<button class="arrow" id="next" onclick="go(1)">&#8594;</button>
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
 
-<div id="dots"></div>
-<div id="hint">&#8592; arrow keys or click to navigate &#8594;</div>
-<div id="counter">1 / 12</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 2 — NONLINEAR DIFFUSION (POROUS MEDIA)
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s2">
+<div class="glow-tl"></div>
+
+<div class="slide-label">Example 01</div>
+<div class="slide-title">Nonlinear Diffusion in Porous Media</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--purple),var(--pink));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <!-- Left: equation + code -->
+  <div class="col-block">
+    <div class="eq-box">
+      $$u_t = \left[u^n \, u_x\right]_x$$
+    </div>
+    <div class="step-heading s1 mt8"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">x</span> = np.linspace(<span class="num">0</span>, <span class="num">1</span>, <span class="num">200</span>)
+<span class="var">eq</span> = PDE(<span class="str">'u'</span>, x)
+eq.add_diffusion(diffusivity=<span class="kw">lambda</span> u: u**n)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre><span class="cmt"># compact-support Gaussian IC</span>
+<span class="var">u0</span> = np.exp(<span class="num">-200</span> * (x - <span class="num">0.5</span>)**<span class="num">2</span>)
+eq.set_ic(u0)
+eq.set_bc(kind=<span class="str">'dirichlet'</span>, side=<span class="str">'all'</span>, value=<span class="num">0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = eq.solve(t_span=(<span class="num">0</span>, <span class="num">0.1</span>), method=<span class="str">'BDF'</span>)
+
+plt.plot(x, sol.u[:, <span class="num">0</span>],  label=<span class="str">f't=0'</span>)
+plt.plot(x, sol.u[:, <span class="num">-1</span>], label=<span class="str">f't={sol.t[-1]}'</span>)</pre>
+  </div>
+
+  <!-- Right: figure -->
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-purple" style="align-self:start;">Nonlinear diffusion · BDF solver</div>
+    <div class="fig-placeholder" style="flex:1;min-height:340px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+      </svg>
+      <div>Figure: Porous medium evolution</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+      <img class="fig" src="porous_medium.png"> 
+    </div>
+    <p class="small-text">Diffusivity $D(u) = u^n$ vanishes where $u=0$, producing finite-speed propagation and sharp fronts — a hallmark of nonlinear degenerate diffusion. BDF handles the resulting stiffness.</p>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 3 — ADVECTION/DIFFUSION 2D
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s3">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(0,201,177,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 02</div>
+<div class="slide-title">Advection/Diffusion in 2D</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--teal),var(--blue));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">
+      $$q_t = -\mathbf{u} \cdot \nabla q + k\nabla^2 q$$
+    </div>
+    <div class="eq-system" style="font-size:13px;">
+      <p>$u = \pi\psi_0\sin^2(\pi x)\sin(2\pi y)$</p>
+      <p>$v = -\pi\psi_0\sin(2\pi x)\sin^2(\pi y)$</p>
+    </div>
+    <p class="small-text" style="margin-bottom:8px;">Advection of a scalar by a divergence-free vortex velocity field (Taylor–Green vortex).</p>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">nx</span>, <span class="var">ny</span> = <span class="num">64</span>, <span class="num">64</span>
+<span class="var">x</span> = np.linspace(<span class="num">0</span>, <span class="num">1</span>, nx); <span class="var">y</span> = np.linspace(<span class="num">0</span>, <span class="num">1</span>, ny)
+<span class="var">u</span> = <span class="kw">lambda</span> x,y: np.sin(np.pi*x)**<span class="num">2</span> * np.sin(<span class="num">2</span>*np.pi*y)
+<span class="var">v</span> = <span class="kw">lambda</span> x,y: -np.sin(<span class="num">2</span>*np.pi*x) * np.sin(np.pi*y)**<span class="num">2</span>
+<span class="var">eq</span> = PDE(<span class="str">'T'</span>, x=x, y=y)
+eq.add_advection(velocity_x=u, velocity_y=v)
+eq.add_diffusion(diffusivity=<span class="num">1e-4</span>)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre><span class="var">T0</span> = np.zeros((nx, ny)); T0[:, nx//<span class="num">2</span>:] = <span class="num">1.0</span>
+eq.set_ic(T0)
+eq.set_bc(side=<span class="str">'all'</span>, kind=<span class="str">'neumann'</span>, value=<span class="num">0.0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = eq.solve(t_span=(<span class="num">0</span>, <span class="num">4</span>))</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-teal" style="align-self:start;">2D · Vortex advection · 6 snapshots</div>
+    <div class="fig-placeholder" style="flex:1;min-height:360px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="9"/><path d="M12 3c4 4 4 10 0 14M3 12c4-4 10-4 14 0"/>
+      </svg>
+      <div>Figure: 6-panel time evolution</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+	<img class="fig" src="advection2d.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 4 — COUPLED REACTION-DIFFUSION
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s4">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(255,128,150,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 03</div>
+<div class="slide-title">Coupled Reaction-Diffusion &nbsp;<span style="font-size:0.55em;color:var(--pink);">A + B → C</span></div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--pink),var(--amber));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-system">
+      <p>$\dfrac{\partial c_A}{\partial t} = D_A \dfrac{\partial^2 c_A}{\partial x^2} - k_1 c_A c_B$</p>
+      <p>$\dfrac{\partial c_B}{\partial t} = D_B \dfrac{\partial^2 c_B}{\partial x^2} - k_1 c_A c_B$</p>
+      <p>$\dfrac{\partial c_C}{\partial t} = D_C \dfrac{\partial^2 c_C}{\partial x^2} + k_1 c_A c_B$</p>
+    </div>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">DA</span>, <span class="var">DB</span>, <span class="var">DC</span> = <span class="num">20e-4</span>, <span class="num">10e-4</span>, <span class="num">5e-4</span>; <span class="var">k1</span> = <span class="num">100.0</span>
+<span class="kw">def</span> <span class="fn">src_AB</span>(x, cA, cB, cC): <span class="kw">return</span> -k1 * cA * cB
+<span class="kw">def</span> <span class="fn">src_C</span> (x, cA, cB, cC): <span class="kw">return</span> +k1 * cA * cB
+<span class="var">eqA</span> = PDE(<span class="str">'cA'</span>, x=x); eqA.add_diffusion(DA); eqA.add_source(src_AB)
+<span class="var">eqB</span> = PDE(<span class="str">'cB'</span>, x=x); eqB.add_diffusion(DB); eqB.add_source(src_AB)
+<span class="var">eqC</span> = PDE(<span class="str">'cC'</span>, x=x); eqC.add_diffusion(DC); eqC.add_source(src_C)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre>eqA.set_ic(gaussian(x)); eqB.set_ic(<span class="num">1.0</span>); eqC.set_ic(<span class="num">0.0</span>)
+eqA.set_bc(side=[<span class="str">'left'</span>,<span class="str">'right'</span>], kind=<span class="str">'dirichlet'</span>, value=[<span class="num">5.0</span>,<span class="num">0.0</span>])
+eqB.set_bc(side=[<span class="str">'left'</span>,<span class="str">'right'</span>], kind=<span class="str">'dirichlet'</span>, value=[<span class="num">0.0</span>,<span class="num">3.0</span>])</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sys</span> = PDESystem([eqA, eqB, eqC])
+<span class="var">sol</span> = sys.solve(t_span=(<span class="num">0</span>, <span class="num">100</span>), method=<span class="str">'BDF'</span>)</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-amber" style="align-self:start;">3-field coupled system · PDESystem</div>
+    <div class="fig-placeholder" style="flex:1;min-height:360px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M3 20h18M3 12l5-5 4 4 5-6 4 3"/>
+      </svg>
+      <div>Figure: IC → steady-state profiles</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+      <img class="fig" src="rxn_diffusion.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 5 — STOKES' SECOND PROBLEM (TIME-DEPENDENT BC)
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s5">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(91,164,255,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 04</div>
+<div class="slide-title">Stokes' Second Problem <span style="font-size:0.5em;color:var(--blue);">— time-dependent BC</span></div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--blue),var(--teal));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$u_t = \nu \, u_{xx}$$</div>
+    <div class="eq-box" style="border-left-color:var(--blue);">
+      Oscillating wall: $U_\text{plate}(t) = A\cos(\omega t)$
+    </div>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">eq</span> = PDE(<span class="str">'u'</span>, y)
+eq.add_diffusion(diffusivity=nu)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre>eq.set_bc(side=<span class="str">'left'</span>, kind=<span class="str">'dirichlet'</span>,
+          value=<span class="kw">lambda</span> t: U0 * np.cos(omega * t))
+eq.set_bc(side=<span class="str">'right'</span>, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)
+eq.set_ic(<span class="num">0.0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">T</span> = <span class="num">2</span>*np.pi / omega   <span class="cmt"># one period</span>
+<span class="var">sol</span> = eq.solve(t_span=(<span class="num">0</span>, <span class="num">4</span>*T), method=<span class="str">'BDF'</span>)</pre>
+
+    <div style="background:var(--bg3);border:1px solid var(--w12);border-radius:8px;padding:12px;margin-top:4px;">
+      <div style="font-size:12px;color:var(--w60);font-family:var(--mono);">Analytical solution:</div>
+      <div style="font-size:13px;margin-top:4px;">$u(y,t) = A\,e^{-\delta y}\cos(\omega t - \delta y)$, &nbsp; $\delta = \sqrt{\omega/2\nu}$</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-teal" style="align-self:start;">Time-dependent BC · 1D diffusion</div>
+    <div class="fig-placeholder" style="flex:1;min-height:360px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M3 12 Q6 6 9 12 Q12 18 15 12 Q18 6 21 12"/>
+      </svg>
+      <div>Figure: velocity profile vs. depth</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+      <img class="fig" src="stokes2.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 6 — POTENTIAL FLOW
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s6">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(0,201,177,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 05</div>
+<div class="slide-title">Potential Flow over a Cylinder</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--teal),var(--blue));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$\nabla^2\psi = 0$$</div>
+    <p class="small-text" style="margin-bottom:8px;">Stream-function formulation. Cylinder enforced as an interior Dirichlet constraint ($\psi = y_c$ on cylinder surface).</p>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">eq</span> = PDE(<span class="str">'psi'</span>, x=x, y=y)
+eq.add_diffusion(diffusivity=<span class="num">1.0</span>)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre><span class="var">cylinder</span> = (X-cx)**<span class="num">2</span> + (Y-cy)**<span class="num">2</span> &lt;= R**<span class="num">2</span>
+eq.set_bc(side=[<span class="str">'bottom'</span>,<span class="str">'top'</span>], kind=<span class="str">'dirichlet'</span>, value=[<span class="num">0.0</span>,<span class="num">3.0</span>])
+eq.set_bc(side=[<span class="str">'left'</span>,<span class="str">'right'</span>], kind=<span class="str">'neumann'</span>,   value=<span class="num">0.0</span>)
+eq.set_interior_bc(mask=cylinder, kind=<span class="str">'dirichlet'</span>, value=cy)
+eq.set_ic(<span class="num">0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = eq.solve_steady()</pre>
+
+    <div style="background:var(--bg3);border:1px solid var(--w12);border-radius:8px;padding:10px;margin-top:4px;">
+      <div style="font-size:11px;color:var(--w60);font-family:var(--mono);">Velocity recovered as: $u = \partial\psi/\partial y$, $v = -\partial\psi/\partial x$</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-teal" style="align-self:start;">Steady-state · Interior BC · Streamlines</div>
+    <div class="fig-placeholder" style="min-height:200px;">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="4"/><path d="M2 12h6M16 12h6M4 6l3 3M17 6l-3 3M4 18l3-3M17 18l-3-3"/>
+      </svg>
+      <div>Figure: Flow over cylinder</div>
+      <img class="fig" src="potential_flow_cylinder.png">
+    </div>
+    <div class="fig-placeholder" style="min-height:160px;">
+      <div>Figure: uPDE logo flow</div>
+      <img class="fig" src="potential_flow_upde.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 7 — DARCY FLOW
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s7">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(244,169,66,0.10) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 06</div>
+<div class="slide-title">Darcy Flow — Heterogeneous Porous Medium</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--amber),var(--pink));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$\nabla \cdot \left[K(\mathbf{x})\,\nabla p\right] = 0$$</div>
+    <p class="small-text" style="margin-bottom:8px;">Log-normal random permeability field. High-contrast $K$ produces channeling and preferential flow paths.</p>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="cmt"># random log-normal permeability</span>
+<span class="var">log_K</span> = gaussian_filter(np.random.randn(nx,ny), sigma=<span class="num">12</span>)
+<span class="var">K</span>     = np.exp(<span class="num">3</span> * log_K / log_K.std())
+<span class="var">eq</span> = PDE(<span class="str">'p'</span>, x=x, y=y)
+eq.add_diffusion(diffusivity=K)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre>eq.set_bc(side=<span class="str">'all'</span>,              kind=<span class="str">'neumann'</span>,   value=<span class="num">0.0</span>)
+eq.set_bc(side=[<span class="str">'left'</span>,<span class="str">'right'</span>], kind=<span class="str">'dirichlet'</span>, value=[<span class="num">1.0</span>, <span class="num">0.0</span>])</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = eq.solve_steady()</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:10px;height:100%;">
+    <div class="tag tag-amber" style="align-self:start;">Steady-state · Spatially-varying K · 200×200</div>
+    <div class="fig-placeholder" style="min-height:160px;">
+      <div>Figure: log₁₀K permeability field</div>
+      <img class="fig" src="darcy_K.png">
+    </div>
+    <div class="fig-placeholder" style="min-height:160px;">
+      <div>Figure: Darcy flux |q| = K|∇p|</div>
+      <img class="fig" src="darcy_flux.png">
+    </div>
+    <div class="fig-placeholder" style="min-height:120px;">
+      <div>Figure: Pressure + streamlines</div>
+      <img class="fig" src="darcy_streamlines.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 8 — ELECTRIC POTENTIAL / COMPLEX PERMITTIVITY
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s8">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(124,111,255,0.15) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 07</div>
+<div class="slide-title">Electric Potential — Lossy Dielectric</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--purple),var(--blue));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$\nabla \cdot (\varepsilon_c \nabla V) = 0, \quad \varepsilon_c = \varepsilon_r + j\varepsilon_i$$</div>
+    <div class="eq-system">
+      <p>$\nabla \cdot (\varepsilon_r\nabla V_r) - \nabla \cdot (\varepsilon_i\nabla V_i) = 0$</p>
+      <p>$\nabla \cdot (\varepsilon_r\nabla V_i) + \nabla \cdot (\varepsilon_i\nabla V_r) = 0$</p>
+    </div>
+    <p class="small-text" style="margin-bottom:8px;">Split into coupled real/imaginary PDEs. The U logo acts as a lossy dielectric inclusion ($\varepsilon_c = 1.5 - 3j$).</p>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="var">eq_r</span> = PDE(<span class="str">"Vr"</span>, x=x, y=y)
+eq_r.add_diffusion(diffusivity=eps_r)
+eq_r.add_term(<span class="kw">lambda</span> Vi, Div_flux_x, Div_flux_y:
+  -Div_flux_x(eps_i,Vi) - Div_flux_y(eps_i,Vi))
+
+<span class="var">eq_i</span> = PDE(<span class="str">"Vi"</span>, x=x, y=y)
+eq_i.add_diffusion(diffusivity=eps_r)
+eq_i.add_term(<span class="kw">lambda</span> Vr, Div_flux_x, Div_flux_y:
+   Div_flux_x(eps_i,Vr) + Div_flux_y(eps_i,Vr))</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = PDESystem([eq_r, eq_i]).solve_steady(method=<span class="str">"linear"</span>)</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-purple" style="align-self:start;">Coupled · Complex permittivity · The Potential of the U</div>
+    <div class="fig-placeholder" style="flex:1;min-height:360px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M6 3v10a6 6 0 0 0 12 0V3"/><path d="M4 21h16"/>
+      </svg>
+      <div>Figure: Electric field intensity |E| [V/m]</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+      <img class="fig" src="potential_of_U.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 9 — COMBUSTION
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s9">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(244,169,66,0.15) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 08</div>
+<div class="slide-title">Combustion — Mixture Fraction &amp; Flamelet Chemistry</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--amber),var(--pink));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$\frac{\partial Z}{\partial t} + u(y)\frac{\partial Z}{\partial x} = D\nabla^2 Z$$</div>
+    <p class="small-text" style="margin-bottom:8px;">Dedicated <code>MixtureFraction</code> equation factory. Tabulated flamelet chemistry via Burke–Schumann or Cantera.</p>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="kw">from</span> upde <span class="kw">import</span> MixtureFraction
+<span class="var">eq</span> = MixtureFraction(<span class="str">'Z'</span>, x=x, y=y,
+  velocity_x=u_field, velocity_y=<span class="num">0.0</span>, diffusivity=D)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre>eq.set_bc(mask=jet_mask_left,    kind=<span class="str">'dirichlet'</span>, value=<span class="num">1.0</span>) <span class="cmt"># fuel</span>
+eq.set_bc(mask=coflow_mask_left, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>) <span class="cmt"># air</span>
+eq.set_bc(side=<span class="str">'right'</span>,         kind=<span class="str">'neumann'</span>,   value=<span class="num">0.0</span>)
+eq.set_ic(<span class="num">0.0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve + post-process</div>
+    <pre><span class="var">sol</span> = eq.solve(t_span=(<span class="num">0</span>, <span class="num">20</span>))
+<span class="var">table</span> = FlameletTable.burke_schumann(Z_st=<span class="num">0.055</span>, ...)
+<span class="var">T_final</span>   = table.T(sol.Z[:,:,-<span class="num">1</span>])
+<span class="var">Y_CH4</span>     = table.Y(<span class="str">'CH4'</span>, sol.Z[:,:,-<span class="num">1</span>])</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:8px;height:100%;">
+    <div class="tag tag-amber" style="align-self:start;">MixtureFraction · FlameletTable · Burke–Schumann</div>
+    <div class="fig-placeholder" style="min-height:140px;">
+      <div>Figure: Temperature [K]</div>
+      <img class="fig" src="comb_T.png">
+    </div>
+    <div class="fig-placeholder" style="min-height:100px;">
+      <div>Figure: CH₄ mass fraction</div>
+      <img class="fig" src="comb_CH4.png">
+    </div>
+    <div class="fig-placeholder" style="min-height:100px;">
+      <div>Figure: O₂ / CO₂ mass fractions</div>
+      <img class="fig" src="comb_O2_CO2.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 10 — WAVE EQUATION
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s10">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(91,164,255,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 09</div>
+<div class="slide-title">Wave Equation — 2D Gaussian Pulse</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--blue),var(--purple));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-box">$$u_{tt} = c^2\nabla^2 u$$</div>
+    <div class="eq-system">
+      <p>Reduced to first-order system:</p>
+      <p>$\dfrac{\partial u}{\partial t} = u^t, \qquad \dfrac{\partial u^t}{\partial t} = c^2\nabla^2 u$</p>
+    </div>
+
+    <div class="step-heading s1"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="kw">from</span> upde <span class="kw">import</span> WaveEquation
+<span class="var">weq</span> = WaveEquation(<span class="str">'u'</span>, <span class="str">'ut'</span>, x=x, y=y, speed=<span class="num">1.0</span>)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre><span class="var">u0</span> = np.exp(-((X-cx)**<span class="num">2</span> + (Y-cy)**<span class="num">2</span>) / (<span class="num">2</span>*sig**<span class="num">2</span>))
+weq.u.set_ic(u0);  weq.ut.set_ic(<span class="num">0.0</span>)
+<span class="cmt"># reflecting walls</span>
+weq.u.set_bc( side=<span class="str">'all'</span>, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)
+weq.ut.set_bc(side=<span class="str">'all'</span>, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = weq.solve(t_span=(<span class="num">0</span>, <span class="num">3</span>))</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-teal" style="align-self:start;">WaveEquation factory · Dirichlet walls · 12 snapshots</div>
+    <div class="fig-placeholder" style="flex:1;min-height:380px;">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="10"/>
+      </svg>
+      <div>Figure: 12-panel pulse evolution in square cavity</div>
+      <div style="font-size:10px;opacity:0.6;">Replace with your matplotlib output</div>
+      <img class="fig" src="wave_eq.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 11 — NAVIER-STOKES
+════════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s11">
+<div class="glow-tl" style="background:radial-gradient(circle,rgba(0,201,177,0.12) 0%,transparent 70%);"></div>
+
+<div class="slide-label">Example 10</div>
+<div class="slide-title">Navier-Stokes — Flow over a Cylinder</div>
+<div class="accent-bar" style="background:linear-gradient(90deg,var(--teal),var(--purple));"></div>
+
+<div class="cols-55-45" style="flex:1;align-items:start;">
+  <div class="col-block">
+    <div class="eq-system">
+      <p>$\dfrac{\partial u}{\partial t} + u\dfrac{\partial u}{\partial x} + v\dfrac{\partial u}{\partial y} = -\dfrac{1}{\rho}\dfrac{\partial p}{\partial x} + \nu\left(\dfrac{\partial^2 u}{\partial x^2}+\dfrac{\partial^2 u}{\partial y^2}\right)$</p>
+      <p style="margin-top:8px;">$\dfrac{\partial v}{\partial t} + u\dfrac{\partial v}{\partial x} + v\dfrac{\partial v}{\partial y} = -\dfrac{1}{\rho}\dfrac{\partial p}{\partial y} + \nu\left(\dfrac{\partial^2 v}{\partial x^2}+\dfrac{\partial^2 v}{\partial y^2}\right)$</p>
+      <p style="margin-top:8px;">$\dfrac{\partial p}{\partial t} = -\beta\left(\dfrac{\partial u}{\partial x}+\dfrac{\partial v}{\partial y}\right) + \varepsilon\nabla^2 p$</p>
+    </div>
+    <p class="small-text">Artificial compressibility method. Pressure equation drives divergence to zero.</p>
+
+    <div class="step-heading s1 mt8"><span class="step-badge step1">1</span>Define</div>
+    <pre><span class="kw">from</span> upde <span class="kw">import</span> NavierStokes2D
+<span class="var">ns</span> = NavierStokes2D(<span class="str">'u'</span>,<span class="str">'v'</span>,<span class="str">'p'</span>, x=x, y=y,
+                    nu=<span class="num">0.01</span>, rho=<span class="num">1.0</span>, beta=<span class="num">0.7</span>)</pre>
+
+    <div class="step-heading s2"><span class="step-badge step2">2</span>Constrain</div>
+    <pre>ns.u.set_bc(side=[<span class="str">'bottom'</span>,<span class="str">'top'</span>], kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)
+ns.u.set_bc(side=<span class="str">'left'</span>,            kind=<span class="str">'dirichlet'</span>, value=<span class="num">1.3</span>)
+<span class="var">mask</span> = (x[:,<span class="kw">None</span>]-cx)**<span class="num">2</span> + (y[<span class="kw">None</span>,:]-cy)**<span class="num">2</span> &lt;= <span class="num">0.5</span>**<span class="num">2</span>
+ns.u.set_interior_bc(mask=mask, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)
+ns.v.set_interior_bc(mask=mask, kind=<span class="str">'dirichlet'</span>, value=<span class="num">0.0</span>)</pre>
+
+    <div class="step-heading s3"><span class="step-badge step3">3</span>Solve</div>
+    <pre><span class="var">sol</span> = ns.solve(t_span=(<span class="num">0</span>, <span class="num">10</span>))</pre>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px;height:100%;">
+    <div class="tag tag-teal" style="align-self:start;">NavierStokes2D · Artificial compressibility · Re≈65</div>
+    <div class="fig-placeholder" style="min-height:170px;">
+      <div>Figure: Velocity magnitude + streamlines</div>
+      <img class="fig" src="ns_lid_cavity.png">
+    </div>
+    <div class="fig-placeholder" style="flex:1;min-height:200px;">
+      <div>Figure: Von Kármán wake behind cylinder</div>
+      <img class="fig" src="ns_cylinder.png">
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <span>Tony Saad · Chemical Engineering · University of Utah</span>
+  <a href="https://github.com/saadgroup/upde">github.com/saadgroup/upde</a>
+</div>
+</section>
+
+
+<!-- ─── Navigation dots ──────────────────────────────────────────── -->
+<nav id="nav">
+  <button class="nav-dot active" title="Hero" onclick="scrollTo(0)"></button>
+  <button class="nav-dot" title="Porous Media" onclick="scrollTo(1)"></button>
+  <button class="nav-dot" title="Advection 2D" onclick="scrollTo(2)"></button>
+  <button class="nav-dot" title="Reaction-Diffusion" onclick="scrollTo(3)"></button>
+  <button class="nav-dot" title="Stokes 2nd" onclick="scrollTo(4)"></button>
+  <button class="nav-dot" title="Potential Flow" onclick="scrollTo(5)"></button>
+  <button class="nav-dot" title="Darcy Flow" onclick="scrollTo(6)"></button>
+  <button class="nav-dot" title="Electric Potential" onclick="scrollTo(7)"></button>
+  <button class="nav-dot" title="Combustion" onclick="scrollTo(8)"></button>
+  <button class="nav-dot" title="Wave Equation" onclick="scrollTo(9)"></button>
+  <button class="nav-dot" title="Navier-Stokes" onclick="scrollTo(10)"></button>
+</nav>
+
 
 <script>
-  const total = 12;
-  let current = 1;
+/* ─── Positioning chart ──────────────────────────────────────── */
+const canvas = document.getElementById('posChart');
+const ctx = canvas.getContext('2d');
 
-  const slide   = document.getElementById('slide');
-  const counter = document.getElementById('counter');
-  const prev    = document.getElementById('prev');
-  const next    = document.getElementById('next');
-  const dotsEl  = document.getElementById('dots');
+function drawChart() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
 
-  for (let i = 1; i <= total; i++) {
-    const d = document.createElement('div');
-    d.className = 'dot' + (i === 1 ? ' active' : '');
-    d.onclick = () => goTo(i);
-    dotsEl.appendChild(d);
-  }
+  const pad = { l:52, r:20, t:20, b:48 };
+  const cx0 = pad.l, cy0 = H-pad.b;
+  const cw = W-pad.l-pad.r, ch = H-pad.t-pad.b;
 
-  function pad(n) { return String(n).padStart(2, '0'); }
+  // axes
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx0,pad.t); ctx.lineTo(cx0,cy0); ctx.lineTo(cx0+cw,cy0); ctx.stroke();
 
-  function goTo(n) {
-    current = n;
-    slide.src = `upde_keynote_Page_${pad(current)}.png`;
-    counter.textContent = `${current} / ${total}`;
-    prev.classList.toggle('disabled', current === 1);
-    next.classList.toggle('disabled', current === total);
-    document.querySelectorAll('.dot').forEach((d, i) => {
-      d.classList.toggle('active', i + 1 === current);
-    });
-  }
+  // arrow heads
+  const ar = (x,y,dir) => {
+    ctx.beginPath();
+    if(dir==='up'){ctx.moveTo(x-5,y+10);ctx.lineTo(x,y);ctx.lineTo(x+5,y+10);}
+    else{ctx.moveTo(x-10,y-5);ctx.lineTo(x,y);ctx.lineTo(x-10,y+5);}
+    ctx.strokeStyle='rgba(255,255,255,0.25)';ctx.stroke();
+  };
+  ar(cx0, pad.t, 'up'); ar(cx0+cw, cy0, 'right');
 
-  function go(dir) { goTo(Math.min(Math.max(current + dir, 1), total)); }
+  // axis labels
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '11px Courier New';
+  ctx.textAlign='center'; ctx.fillText('Ease of use',   cx0+cw/2, cy0+30);
+  ctx.save(); ctx.translate(18, pad.t+ch/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText('Flexibility', 0, 0); ctx.restore();
 
-  document.addEventListener('keydown', e => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') go(1);
-    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp') go(-1);
+  // tools
+  const tools = [
+    { label:'Fenics',   x:0.15, y:0.82, c:'rgba(255,128,150,0.9)' },
+    { label:'OpenFOAM', x:0.22, y:0.72, c:'rgba(255,128,150,0.9)' },
+    { label:'Uintah',   x:0.12, y:0.58, c:'rgba(255,128,150,0.9)' },
+    { label:'Comsol',   x:0.62, y:0.42, c:'rgba(244,169,66,0.9)' },
+    { label:'Fluent',   x:0.72, y:0.28, c:'rgba(244,169,66,0.9)' },
+    { label:'Aspen',    x:0.83, y:0.18, c:'rgba(244,169,66,0.9)' },
+    { label:'uPDE',     x:0.84, y:0.84, c:'rgba(124,111,255,1)',  big:true },
+  ];
+
+  tools.forEach(t => {
+    const px = cx0 + t.x*cw, py = pad.t + (1-t.y)*ch;
+    ctx.beginPath();
+    ctx.roundRect(px-28, py-10, 56, 20, 4);
+    ctx.fillStyle = t.big ? 'rgba(124,111,255,0.25)' : 'rgba(255,255,255,0.06)';
+    ctx.fill();
+    ctx.strokeStyle = t.c; ctx.lineWidth = t.big ? 2 : 1;
+    ctx.stroke();
+    ctx.fillStyle = t.c;
+    ctx.font = (t.big ? 'bold 12px' : '10px') + ' Courier New';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t.label, px, py);
   });
+}
 
-  let tx = 0;
-  document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; });
-  document.addEventListener('touchend',   e => {
-    const dx = e.changedTouches[0].clientX - tx;
-    if (Math.abs(dx) > 40) go(dx < 0 ? 1 : -1);
+function resizeChart() {
+  const size = Math.min(canvas.parentElement.clientWidth, 380);
+  canvas.width = size; canvas.height = size;
+  drawChart();
+}
+window.addEventListener('resize', resizeChart);
+resizeChart();
+
+/* ─── Scroll nav ─────────────────────────────────────────────── */
+const slides = document.querySelectorAll('.slide');
+const dots = document.querySelectorAll('.nav-dot');
+
+function scrollTo(i) { slides[i].scrollIntoView({behavior:'smooth'}); }
+
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if(e.isIntersecting) {
+      const i = Array.from(slides).indexOf(e.target);
+      dots.forEach((d,j) => d.classList.toggle('active', i===j));
+    }
   });
+}, { threshold: 0.4 });
 
-  function copyPip() {
-    navigator.clipboard.writeText('pip install upde').then(() => {
-      const el = document.getElementById('pip');
-      el.textContent = '✓ copied!';
-      el.classList.add('copied');
-      setTimeout(() => {
-        el.textContent = '$ pip install upde';
-        el.classList.remove('copied');
-      }, 2000);
-    });
-  }
-
-  goTo(1);
-
-  const hint = document.getElementById('hint');
-  hint.style.opacity = '0';
-  hint.style.transition = 'none';
-
-  slide.addEventListener('load', () => {
-    hint.style.transition = 'opacity 0.5s ease';
-    hint.style.opacity = '1';
-    setTimeout(() => {
-      hint.style.transition = 'opacity 1.5s ease';
-      hint.style.opacity = '0';
-    }, 8000);
-  }, { once: true });
-
-  document.addEventListener('keydown', () => { hint.style.opacity = '0'; }, { once: true });
-  document.addEventListener('touchend', () => { hint.style.opacity = '0'; }, { once: true });
+slides.forEach(s => obs.observe(s));
 </script>
 </body>
 </html>
