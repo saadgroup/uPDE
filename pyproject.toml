@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "upde"
-version = "1.0.0"
+version = "1.0.1"
 description = "A lightweight Python library for solving 1D and 2D PDEs using the method of lines"
 readme = "README.md"
 license = { text = "MIT" }
@@ -51,19 +51,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage       = "https://github.com/saadgroup/upde"
-Documentation  = "https://github.com/saadgroup/upde#readme"
+Homepage       = "https://saadgroup.github.io/uPDE/"
+Documentation  = "https://saadgroup.github.io/uPDE/"
 Repository     = "https://github.com/saadgroup/upde"
 "Bug Tracker"  = "https://github.com/saadgroup/upde/issues"
 Paper          = "https://doi.org/10.1016/j.softx.2026.102715"
 
 [tool.hatch.build.targets.wheel]
 packages = ["upde"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "upde/",
-    "pyproject.toml",
-    "README.md",
-    "LICENSE",
-]
