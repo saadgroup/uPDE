@@ -1,7 +1,7 @@
 # uPDE — method-of-lines PDE solver
 # https://doi.org/10.1016/j.softx.2026.102715
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 __author__  = "Tony Saad"
 __email__   = "tony.saad@utah.edu"
 __license__ = "MIT"

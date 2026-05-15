@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "upde"
-version = "1.0.1"
+version = "1.0.2"
 description = "A lightweight Python library for solving 1D and 2D PDEs using the method of lines"
 readme = "README.md"
 license = { text = "MIT" }
