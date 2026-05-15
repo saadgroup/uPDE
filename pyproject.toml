@@ -51,10 +51,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage       = "https://github.com/tsaad-dev/upde"
-Documentation  = "https://github.com/tsaad-dev/upde#readme"
-Repository     = "https://github.com/tsaad-dev/upde"
-"Bug Tracker"  = "https://github.com/tsaad-dev/upde/issues"
+Homepage       = "https://github.com/saadgroup/upde"
+Documentation  = "https://github.com/saadgroup/upde#readme"
+Repository     = "https://github.com/saadgroup/upde"
+"Bug Tracker"  = "https://github.com/saadgroup/upde/issues"
 Paper          = "https://doi.org/10.1016/j.softx.2026.102715"
 
 [tool.hatch.build.targets.wheel]
