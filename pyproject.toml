@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "upde"
+version = "1.0.0"
+description = "A lightweight Python library for solving 1D and 2D PDEs using the method of lines"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Tony Saad", email = "tony.saad@utah.edu" },
+]
+keywords = [
+    "PDE",
+    "partial differential equations",
+    "method of lines",
+    "numerical methods",
+    "scipy",
+    "numpy",
+    "heat equation",
+    "advection diffusion",
+    "Navier-Stokes",
+    "reaction diffusion",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+]
+
+[project.optional-dependencies]
+cantera = ["cantera>=3.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage       = "https://github.com/tsaad-dev/upde"
+Documentation  = "https://github.com/tsaad-dev/upde#readme"
+Repository     = "https://github.com/tsaad-dev/upde"
+"Bug Tracker"  = "https://github.com/tsaad-dev/upde/issues"
+Paper          = "https://doi.org/10.1016/j.softx.2026.102715"
+
+[tool.hatch.build.targets.wheel]
+packages = ["upde"]

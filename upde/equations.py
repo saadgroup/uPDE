@@ -65,7 +65,7 @@ Combustion (return PDE):
 """
 
 import numpy as np
-from upde import PDE, PDESystem
+from .upde import PDE, PDESystem
 
 
 # ---------------------------------------------------------------------------
