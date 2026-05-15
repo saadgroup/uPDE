@@ -57,5 +57,13 @@ Repository     = "https://github.com/saadgroup/upde"
 "Bug Tracker"  = "https://github.com/saadgroup/upde/issues"
 Paper          = "https://doi.org/10.1016/j.softx.2026.102715"
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "upde/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["upde"]
