@@ -443,6 +443,9 @@ discretisation of the advective term:
 ```python
 eq.add_advection(velocity=1.0, scheme='van_leer')
 eq.add_flux(flux=lambda u: 0.5 * u**2, scheme='superbee')
+
+# 2D
+eq2.add_advection(velocity_x='u', velocity_y='v', scheme='mc')
 ```
 
 The limited schemes use MUSCL reconstruction. Each cell gets a limited slope
@@ -464,7 +467,7 @@ Lax–Friedrichs (Rusanov) flux, which reduces to plain upwinding for a linear f
 handles sonic points correctly (e.g. Burgers expansion fans through $u = 0$).
 
 Notes:
-- **1D only** for now. In 2D the limited schemes raise `NotImplementedError`.
+- In 2D the reconstruction is applied dimension by dimension (along $x$, then along $y$).
 - Boundary cells fall back to first-order upwind (except with periodic BCs).
 - Limited schemes are nonlinear in $\phi$ even for linear advection, so
   `solve_steady(method='auto')` uses the Newton solver.
@@ -658,7 +661,7 @@ ConservationLaw(field, x, flux, flux_y=None, scheme='upwind')
 |-----------|-------------|
 | `flux` | Callable $F(u)$ — 1D flux, or x-direction flux in 2D |
 | `flux_y` | Callable $G(u)$ — y-direction flux (2D only) |
-| `scheme` | `'upwind'` (default), `'central'`, or a limiter: `'minmod'`, `'van_leer'`, `'mc'`, `'superbee'` (1D) — see [Advection Schemes](#advection-schemes) |
+| `scheme` | `'upwind'` (default), `'central'`, or a limiter: `'minmod'`, `'van_leer'`, `'mc'`, `'superbee'` — see [Advection Schemes](#advection-schemes) |
 
 The wave speed $a = dF/du$ is inferred automatically via finite difference
 and used to select the upwind direction.
@@ -1155,11 +1158,11 @@ def my_rhs(Dx, Dy, **fields):
 |------|--------|-------|
 | `add_advection` (upwind) | Convective upwind | 1st in space |
 | `add_advection` (central) | Convective central | 2nd in space |
-| `add_advection` (limited, 1D) | MUSCL + slope limiter, TVD | 2nd in smooth regions, 1st at extrema |
+| `add_advection` (limited) | MUSCL + slope limiter, TVD | 2nd in smooth regions, 1st at extrema |
 | `add_diffusion` | Conservative central | 2nd in space |
 | `add_flux` (upwind) | Donor-cell, wave speed inferred | 1st in space |
 | `add_flux` (central) | Central flux divergence | 2nd in space |
-| `add_flux` (limited, 1D) | MUSCL + slope limiter, Rusanov face flux | 2nd in smooth regions, 1st at extrema |
+| `add_flux` (limited) | MUSCL + slope limiter, Rusanov face flux | 2nd in smooth regions, 1st at extrema |
 | `Dx`, `Dy` | Central difference | 2nd in space |
 | `Dxx`, `Dyy` | Central difference | 2nd in space |
 | `Div_x`, `Div_y` | Central conservative | 2nd in space |
@@ -1179,7 +1182,7 @@ conditions before each stencil application.
 
 **Fronts or shocks are smeared**
 - First-order `'upwind'` adds numerical diffusion $\tfrac{c\,\Delta x}{2}\,\partial_{xx}$
-- Use a limited scheme, e.g. `add_advection(velocity=c, scheme='van_leer')` (1D)
+- Use a limited scheme, e.g. `add_advection(velocity=c, scheme='van_leer')`
 
 **Solution blows up**
 - Add or increase diffusivity to stabilise advection

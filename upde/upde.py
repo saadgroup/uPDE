@@ -570,11 +570,6 @@ def _check_scheme(scheme, is_2d):
             f"scheme must be one of {', '.join(repr(s) for s in _SCHEMES)}; "
             f"got {scheme!r}"
         )
-    if is_2d and scheme in _LIMITED_SCHEMES:
-        raise NotImplementedError(
-            f"scheme={scheme!r} is currently available in 1D only. "
-            f"In 2D use 'upwind' or 'central'."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +673,8 @@ class PDE:
             limiter names -- second-order MUSCL reconstruction with that
                          slope limiter: second order in smooth regions,
                          first order at extrema and discontinuities, no new
-                         oscillations (TVD).  1D only for now.
+                         oscillations (TVD).  In 2D applied dimension
+                         by dimension.
         """
         _check_scheme(scheme, self.is_2d)
         if self.is_2d:
@@ -771,13 +767,14 @@ class PDE:
                          cell faces with that slope limiter, combined with
                          the local Lax-Friedrichs (Rusanov) face flux.
                          TVD; handles sonic points (e.g. Burgers expansion
-                         fans) correctly.  1D only for now.
+                         fans) correctly.  In 2D applied dimension by
+                         dimension.
 
         Notes
         -----
         Each flux callable must accept the field array and return an array
         of the same shape.  The wave speed is inferred automatically as
-        dF/dphi via forward finite difference (eps=1e-6*max|phi|).
+        dF/dphi via a central finite difference with step 1e-6*(1+|phi|).
         """
         _check_scheme(scheme, self.is_2d)
         if self.is_2d:
@@ -1409,8 +1406,8 @@ def _build_sparsity(equations):
     Build a sparse sparsity-pattern matrix for the coupled steady-state system.
 
     Each equation occupies a diagonal block corresponding to the 5-point (2D)
-    or 3-point (1D) stencil -- 5-point in 1D for limited (MUSCL) schemes, with
-    wrap-around entries for periodic 1D BCs.  Field coupling (via add_source, add_term, etc.)
+    or 3-point (1D) stencil, widened to ±2 along each axis for limited (MUSCL)
+    schemes, with wrap-around entries on periodic axes.  Field coupling (via add_source, add_term, etc.)
     adds off-diagonal blocks between coupled equations — using a fully-dense
     block as a conservative upper bound.
 
@@ -1430,26 +1427,38 @@ def _build_sparsity(equations):
         ni = eq.n_total
 
         if eq.is_2d:
-            nx, ny = eq.nx, eq.ny
-            # Centre diagonal
-            k = np.arange(ni)
-            rows = [k]; cols = [k]
-            # x-neighbours  (row±1 in x, i.e. ±ny in flat index)
-            ii = np.arange(nx); jj = np.arange(ny)
-            II, JJ = np.meshgrid(ii, jj, indexing='ij')
-            K = (II * ny + JJ).ravel()
-            # left (ii>0)
-            m = II.ravel() > 0;          rows.append(K[m]); cols.append(K[m] - ny)
-            # right (ii<nx-1)
-            m = II.ravel() < nx - 1;     rows.append(K[m]); cols.append(K[m] + ny)
-            # bottom (jj>0)
-            m = JJ.ravel() > 0;          rows.append(K[m]); cols.append(K[m] - 1)
-            # top (jj<ny-1)
-            m = JJ.ravel() < ny - 1;     rows.append(K[m]); cols.append(K[m] + 1)
+            # 5-point stencil, widened to 9 points (±1, ±2 along each axis)
+            # for limited (MUSCL) schemes; periodic axes wrap around.
+            nx, ny  = eq.nx, eq.ny
+            limited = any(t.get('scheme') in _LIMITED_SCHEMES
+                          for t in eq._advection + eq._fluxes)
+            width   = 2 if limited else 1
+            bct     = eq._bc_types_2d()
+            per_x   = bct['x-'] == 'periodic'
+            per_y   = bct['y-'] == 'periodic'
+            II, JJ  = np.meshgrid(np.arange(nx), np.arange(ny), indexing='ij')
+            II, JJ  = II.ravel(), JJ.ravel()
+            K       = II * ny + JJ
+            rows = [K]; cols = [K]
+            for off in range(1, width + 1):
+                for sgn in (1, -1):
+                    i2 = II + sgn * off
+                    if per_x:
+                        rows.append(K); cols.append((i2 % nx) * ny + JJ)
+                    else:
+                        m = (i2 >= 0) & (i2 < nx)
+                        rows.append(K[m]); cols.append(i2[m] * ny + JJ[m])
+                    j2 = JJ + sgn * off
+                    if per_y:
+                        rows.append(K); cols.append(II * ny + (j2 % ny))
+                    else:
+                        m = (j2 >= 0) & (j2 < ny)
+                        rows.append(K[m]); cols.append(II[m] * ny + j2[m])
             r = np.concatenate(rows); c = np.concatenate(cols)
             S = _sp.csr_matrix(
                 (np.ones(len(r), dtype=np.float64), (r, c)), shape=(ni, ni)
             )
+            S.data[:] = 1.0
         else:
             # 3-point stencil, widened to 5 points for limited (MUSCL)
             # schemes; periodic BCs add the wrap-around entries.
@@ -2134,8 +2143,14 @@ class PDESystem:
             for term in eq._advection:
                 scheme = term.get('scheme', 'upwind')
                 if eq.is_2d:
-                    conv2d = _convect_central_2d if scheme == 'central' \
-                             else _convect_2d
+                    if scheme == 'central':
+                        conv2d = _convect_central_2d
+                    elif scheme == 'upwind':
+                        conv2d = _convect_2d
+                    else:
+                        def conv2d(phi, c, d, axis, bc_lo, bc_hi, _s=scheme):
+                            return _convect_limited(phi, c, d, _s, axis,
+                                                    bc_lo, bc_hi)
                     if term['velocity_x'] is not None:
                         cx  = _call(term['velocity_x'], coords, fields_nd, t=t)
                         rhs -= conv2d(phi, cx, eq.dx, axis=0,
@@ -2182,6 +2197,14 @@ class PDESystem:
             # --- Conservation-law fluxes: -dF/dx [-dG/dy] ---
             # flux callables take the field array directly: F(phi) -> ndarray
             for term in eq._fluxes:
+                if eq.is_2d and term['scheme'] in _LIMITED_SCHEMES:
+                    for key, d, ax, lo, hi in (('flux_x', eq.dx, 0, 'x-', 'x+'),
+                                               ('flux_y', eq.dy, 1, 'y-', 'y+')):
+                        if term.get(key) is not None:
+                            rhs -= _flux_limited(term[key], phi, d,
+                                                 term['scheme'], ax,
+                                                 bct[lo], bct[hi])
+                    continue
                 if eq.is_2d:
                     if term.get('flux_x') is not None:
                         fn = term['flux_x']
@@ -2205,18 +2228,18 @@ class PDESystem:
                                                    bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
                     fn = term['flux']
+                    bc_lo = 'periodic' if any(bc.kind == 'periodic'
+                                              for bc in eq._bcs) else 'none'
                     if term['scheme'] in _LIMITED_SCHEMES:
-                        bc_lo = 'periodic' if any(bc.kind == 'periodic'
-                                                  for bc in eq._bcs) else 'none'
                         rhs -= _flux_limited_1d(fn, phi, eq.dx, term['scheme'],
                                                 bc_lo, bc_lo)
                         continue
                     F  = fn(phi)
                     if term['scheme'] == 'central':
-                        rhs -= _central_flux_1d(F, eq.dx)
+                        rhs -= _central_flux_1d(F, eq.dx, bc_lo, bc_lo)
                     else:
                         a = _wave_speed(fn, phi)
-                        rhs -= _upwind_flux_1d(F, a, eq.dx)
+                        rhs -= _upwind_flux_1d(F, a, eq.dx, bc_lo, bc_lo)
 
             # --- Generic add_term callables ---
             if eq._generic_terms:
@@ -2408,12 +2431,16 @@ def _upwind_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
 
 def _wave_speed(flux_fn, phi, eps=1e-6):
     """
-    Estimate local wave speed a(phi) = dF/dphi via forward finite difference.
-    eps is scaled by max|phi| to handle fields of varying magnitude.
+    Estimate local wave speed a(phi) = dF/dphi by a central finite difference
+    with a pointwise step h_i = eps * (1 + |phi_i|).
+
+    The step is local so that a(phi_i) depends on phi_i only: a step scaled
+    by a global max|phi| would couple every node to the arg-max node and
+    break the stencil sparsity of the Jacobian.  Central differencing keeps
+    the error O(h^2) at the same cost (two flux evaluations).
     """
-    scale = np.max(np.abs(phi))
-    h     = eps * scale if scale > 0 else eps
-    return (flux_fn(phi + h) - flux_fn(phi)) / h
+    h = eps * (1.0 + np.abs(phi))
+    return (flux_fn(phi + h) - flux_fn(phi - h)) / (2.0 * h)
 
 
 def _convect_1d(phi, c, dx, bc_lo='none', bc_hi='none'):
@@ -2441,14 +2468,16 @@ def _convect_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
     return c * np.where(c >= 0, dphi_bwd, dphi_fwd)
 
 
-def _upwind_flux_1d(F, a, dx):
+def _upwind_flux_1d(F, a, dx, bc_lo='none', bc_hi='none'):
     """
     Upwind flux differencing  dF/dx  in 1D.
     Upwind direction determined by wave speed a = dF/dphi (not sign(F)).
     Uses simple donor-cell: F_{i+1/2} = F_i if a>=0 else F_{i+1}.
+    Ghosts: wrapped for periodic, otherwise replicated (zero gradient).
     """
-    F_l  = np.roll(F,  1)   # F[i-1]
-    F_r  = np.roll(F, -1)   # F[i+1]
+    Fp   = _ghost_pad(F, 0, bc_lo, bc_hi)
+    F_l  = Fp[:-2]          # F[i-1]
+    F_r  = Fp[2:]           # F[i+1]
     # face flux at i+1/2: upwind on a
     F_iph = np.where(a >= 0, F,   F_r)   # right face
     F_imh = np.where(a >= 0, F_l, F  )   # left face
@@ -2472,9 +2501,10 @@ def _upwind_flux_2d(F, a, d, axis, bc_lo='none', bc_hi='none'):
     return (F_iph - F_imh) / d
 
 
-def _central_flux_1d(F, dx):
-    """Central differencing of flux  dF/dx  in 1D."""
-    return (np.roll(F, -1) - np.roll(F, 1)) / (2.0 * dx)
+def _central_flux_1d(F, dx, bc_lo='none', bc_hi='none'):
+    """Central differencing of flux  dF/dx  in 1D (ghosts as _ghost_pad)."""
+    Fp = _ghost_pad(F, 0, bc_lo, bc_hi)
+    return (Fp[2:] - Fp[:-2]) / (2.0 * dx)
 
 
 def _central_flux_2d(F, d, axis, bc_lo='none', bc_hi='none'):
@@ -2531,52 +2561,75 @@ def _limited_slope(dm, dp, limiter):
     return np.where(same, out, 0.0)
 
 
-def _muscl_faces_1d(phi, limiter, bc_lo='none', bc_hi='none'):
+def _muscl_faces(phi, limiter, axis=0, bc_lo='none', bc_hi='none'):
     """
-    MUSCL reconstruction of phi at the n+1 faces of a 1D grid of n nodes.
+    MUSCL reconstruction of phi at the n+1 faces along `axis` (n nodes).
 
-    Returns (uL, uR), each of length n+1: face k sits between node k-1 and
-    node k (face 0 is left of node 0, face n is right of node n-1).
-      uL[k] -- value extrapolated from the left  cell (node k-1)
-      uR[k] -- value extrapolated from the right cell (node k)
+    Returns (uL, uR), each with n+1 entries along `axis`: face k sits
+    between node k-1 and node k (face 0 is left of node 0, face n is right
+    of node n-1).
+      uL[k] -- value extrapolated from the low-side  cell (node k-1)
+      uR[k] -- value extrapolated from the high-side cell (node k)
 
-    Two ghost cells per side: wrapped for periodic, otherwise replicated
+    Two ghost cells per end: wrapped for periodic, otherwise replicated
     (zero gradient).  Replicated ghosts give a zero limited slope in the
     boundary cells, so the scheme falls back to first-order upwind there.
+    In 2D the reconstruction is applied dimension by dimension.
     """
+    n  = phi.shape[axis]
+    sl = lambda a, i, j: a[_axis_slice(a.ndim, axis, i, j)]     # views, no copy
     if bc_lo == 'periodic':
-        lo = phi[-2:]
+        lo = sl(phi, n - 2, n)
     else:
-        lo = np.full(2, phi[0])
+        lo = np.concatenate([sl(phi, 0, 1)] * 2, axis=axis)
     if bc_hi == 'periodic':
-        hi = phi[:2]
+        hi = sl(phi, 0, 2)
     else:
-        hi = np.full(2, phi[-1])
-    p  = np.concatenate([lo, phi, hi])            # nodes -2 .. n+1
-    dm = p[1:-1] - p[:-2]                         # nodes -1 .. n
-    dp = p[2:]   - p[1:-1]
-    sig = _limited_slope(dm, dp, limiter)         # nodes -1 .. n
-    pc  = p[1:-1]
-    uL  = pc[:-1] + 0.5 * sig[:-1]                # from nodes -1 .. n-1
-    uR  = pc[1:]  - 0.5 * sig[1:]                 # from nodes  0 .. n
+        hi = np.concatenate([sl(phi, n - 1, n)] * 2, axis=axis)
+    p   = np.concatenate([lo, phi, hi], axis=axis)          # nodes -2 .. n+1
+    m   = n + 4
+    pc  = sl(p, 1, m - 1)                                   # nodes -1 .. n
+    dm  = pc - sl(p, 0, m - 2)
+    dp  = sl(p, 2, m) - pc
+    sig = _limited_slope(dm, dp, limiter)
+    uL  = sl(pc, 0, n + 1) + 0.5 * sl(sig, 0, n + 1)
+    uR  = sl(pc, 1, n + 2) - 0.5 * sl(sig, 1, n + 2)
     return uL, uR
 
 
-def _convect_limited_1d(phi, c, dx, limiter, bc_lo='none', bc_hi='none'):
+def _axis_slice(ndim, axis, i, j):
+    """Index tuple selecting [i:j] along `axis` of an ndim array."""
+    idx = [slice(None)] * ndim
+    idx[axis] = slice(i, j)
+    return tuple(idx)
+
+
+def _muscl_faces_1d(phi, limiter, bc_lo='none', bc_hi='none'):
+    """1D wrapper of _muscl_faces (kept for tests and readability)."""
+    return _muscl_faces(phi, limiter, 0, bc_lo, bc_hi)
+
+
+def _convect_limited(phi, c, d, limiter, axis=0, bc_lo='none', bc_hi='none'):
     """
-    Convective form  c * dphi/dx  with limited (TVD) MUSCL reconstruction.
+    Convective form  c * dphi/d{axis}  with limited (TVD) MUSCL reconstruction.
     Upwind side chosen by sign(c) at the node.  For constant c this is the
     standard conservative MUSCL scheme for linear advection.
     """
-    uL, uR = _muscl_faces_1d(phi, limiter, bc_lo, bc_hi)
-    d_pos  = (uL[1:] - uL[:-1]) / dx              # c >= 0: left-biased faces
-    d_neg  = (uR[1:] - uR[:-1]) / dx              # c <  0: right-biased faces
+    n      = phi.shape[axis]
+    uL, uR = _muscl_faces(phi, limiter, axis, bc_lo, bc_hi)
+    hi, lo = _axis_slice(phi.ndim, axis, 1, n + 1), _axis_slice(phi.ndim, axis, 0, n)
+    d_pos  = (uL[hi] - uL[lo]) / d                                  # c >= 0
+    d_neg  = (uR[hi] - uR[lo]) / d                                  # c <  0
     return c * np.where(c >= 0, d_pos, d_neg)
 
 
-def _flux_limited_1d(flux_fn, phi, dx, limiter, bc_lo='none', bc_hi='none'):
+def _convect_limited_1d(phi, c, dx, limiter, bc_lo='none', bc_hi='none'):
+    return _convect_limited(phi, c, dx, limiter, 0, bc_lo, bc_hi)
+
+
+def _flux_limited(flux_fn, phi, d, limiter, axis=0, bc_lo='none', bc_hi='none'):
     """
-    dF/dx with limited MUSCL face states and the local Lax-Friedrichs
+    dF/d{axis} with limited MUSCL face states and the local Lax-Friedrichs
     (Rusanov) face flux
 
         F_face = (F(uL) + F(uR))/2 - alpha/2 * (uR - uL),
@@ -2585,12 +2638,18 @@ def _flux_limited_1d(flux_fn, phi, dx, limiter, bc_lo='none', bc_hi='none'):
     For a linear flux F = c*phi this reduces exactly to upwinding the
     reconstructed states.
     """
-    uL, uR = _muscl_faces_1d(phi, limiter, bc_lo, bc_hi)
+    n      = phi.shape[axis]
+    uL, uR = _muscl_faces(phi, limiter, axis, bc_lo, bc_hi)
     FL, FR = flux_fn(uL), flux_fn(uR)
     alpha  = np.maximum(np.abs(_wave_speed(flux_fn, uL)),
                         np.abs(_wave_speed(flux_fn, uR)))
     Fh     = 0.5 * (FL + FR) - 0.5 * alpha * (uR - uL)
-    return (Fh[1:] - Fh[:-1]) / dx
+    return (Fh[_axis_slice(Fh.ndim, axis, 1, n + 1)]
+            - Fh[_axis_slice(Fh.ndim, axis, 0, n)]) / d
+
+
+def _flux_limited_1d(flux_fn, phi, dx, limiter, bc_lo='none', bc_hi='none'):
+    return _flux_limited(flux_fn, phi, dx, limiter, 0, bc_lo, bc_hi)
 
 
 def _diffuse_1d(phi, D, dx, lo=('none', 0.0), hi=('none', 0.0)):
