@@ -224,6 +224,7 @@ def _build_operators(eq, fields_nd, bct, t=0.0):
 
     if eq.is_2d:
         dx, dy = eq.dx, eq.dy
+        gn     = eq._neumann_g_2d(t)
 
         def Dx(phi, scheme='central', c=None):
             """∂phi/∂x. scheme='central' (default) or 'upwind' (requires c)."""
@@ -305,11 +306,13 @@ def _build_operators(eq, fields_nd, bct, t=0.0):
 
         def Div_flux_x(k, phi):
             return _diffuse_2d(_resolve(phi), _resolve(k), dx, axis=0,
-                               bc_lo=bct['x-'], bc_hi=bct['x+'])
+                               bc_lo=bct['x-'], bc_hi=bct['x+'],
+                               g_lo=gn['x-'], g_hi=gn['x+'])
 
         def Div_flux_y(k, phi):
             return _diffuse_2d(_resolve(phi), _resolve(k), dy, axis=1,
-                               bc_lo=bct['y-'], bc_hi=bct['y+'])
+                               bc_lo=bct['y-'], bc_hi=bct['y+'],
+                               g_lo=gn['y-'], g_hi=gn['y+'])
 
     else:
         dx    = eq.dx
@@ -1297,6 +1300,33 @@ class PDE:
                 hi = (bc.kind, g)
         return lo, hi
 
+    def _neumann_g_2d(self, t):
+        """
+        Prescribed outward normal derivative along each 2D edge at time t.
+
+        Returns {'x-': (ny,), 'x+': (ny,), 'y-': (nx,), 'y+': (nx,)} arrays,
+        zero wherever no Neumann BC applies.  Respects partial-wall mask= BCs;
+        later registrations win.
+        """
+        g = {'x-': np.zeros(self.ny), 'x+': np.zeros(self.ny),
+             'y-': np.zeros(self.nx), 'y+': np.zeros(self.nx)}
+        for bc in self._bcs:
+            if bc.kind != 'neumann':
+                continue
+            val    = bc.get_value(t)
+            normal = bc.normal
+            if normal is None:
+                try:
+                    normal = _infer_normal_2d(bc.mask, (self.nx, self.ny))
+                except ValueError:
+                    if val == 0.0:
+                        continue   # zero flux needs no edge assignment
+                    raise
+            edge = {'x-': bc.mask[0, :], 'x+': bc.mask[-1, :],
+                    'y-': bc.mask[:, 0], 'y+': bc.mask[:, -1]}[normal]
+            g[normal][edge] = val
+        return g
+
     def _bc_types_2d(self):
         """
         Return the BC kind for each of the four 2D edges.
@@ -2129,14 +2159,17 @@ class PDESystem:
             # --- Diffusion ---
             for term in eq._diffusion:
                 if eq.is_2d:
+                    gn = eq._neumann_g_2d(t)
                     if term['diffusivity_x'] is not None:
                         Dx   = _call(term['diffusivity_x'], coords, fields_nd, t=t)
                         rhs += _diffuse_2d(phi, Dx, eq.dx, axis=0,
-                                           bc_lo=bct['x-'], bc_hi=bct['x+'])
+                                           bc_lo=bct['x-'], bc_hi=bct['x+'],
+                                           g_lo=gn['x-'], g_hi=gn['x+'])
                     if term['diffusivity_y'] is not None:
                         Dy   = _call(term['diffusivity_y'], coords, fields_nd, t=t)
                         rhs += _diffuse_2d(phi, Dy, eq.dy, axis=1,
-                                           bc_lo=bct['y-'], bc_hi=bct['y+'])
+                                           bc_lo=bct['y-'], bc_hi=bct['y+'],
+                                           g_lo=gn['y-'], g_hi=gn['y+'])
                 else:
                     D    = _call(term['diffusivity'], coords, fields_nd, t=t)
                     lo, hi = eq._bc_1d(t)
@@ -2287,6 +2320,33 @@ def _ghost_pad(arr, axis, bc_lo, bc_hi):
     return np.concatenate([lo, arr, hi], axis=axis)
 
 
+def _mirror_ghosts(arr, axis, bc_lo, bc_hi, d=1.0, g_lo=0.0, g_hi=0.0):
+    """
+    Ghost nodes for second-derivative stencils on a node-based grid.
+
+      'periodic'            -- wrap from the opposite end
+      anything else         -- mirror ghost  arr[1] + 2*d*g  (low end),
+                               arr[-2] + 2*d*g (high end), where g is the
+                               prescribed outward normal derivative (0 for
+                               zero flux / no BC).
+
+    g_lo / g_hi may be scalars or arrays along the edge (shape of the
+    remaining axis).  Returns (lo, hi), each with size 1 along `axis`.
+    """
+    def _edge(g):
+        g = np.asarray(g, dtype=float)
+        return np.expand_dims(g, axis) if g.ndim else g
+    if bc_lo == 'periodic':
+        lo = np.take(arr, [-1], axis=axis)
+    else:
+        lo = np.take(arr, [1], axis=axis) + 2.0 * d * _edge(g_lo)
+    if bc_hi == 'periodic':
+        hi = np.take(arr, [0], axis=axis)
+    else:
+        hi = np.take(arr, [-2], axis=axis) + 2.0 * d * _edge(g_hi)
+    return lo, hi
+
+
 def _ghost_pad_dirichlet(arr, axis, bc_lo, bc_hi, val_lo=0.0, val_hi=0.0):
     """
     Ghost-cell padding with proper Dirichlet ghost values.
@@ -2297,6 +2357,12 @@ def _ghost_pad_dirichlet(arr, axis, bc_lo, bc_hi, val_lo=0.0, val_hi=0.0):
     This gives correct second-derivative stencils at Dirichlet walls.
 
     Used by Dxx/Dyy operators in add_term callables.
+
+    Neumann / none edges use a replicated (zero-gradient) ghost.  This is
+    deliberately NOT the mirror ghost used by add_diffusion: add_term
+    callables mix Dxx with first-derivative operators (Dx, Dy), which also
+    use replicated ghosts, and the two must stay consistent at the boundary
+    node (e.g. the viscous/pressure balance at a NavierStokes2D outlet).
     """
     if bc_lo == 'periodic':
         lo = np.take(arr, [-1], axis=axis)
@@ -2558,11 +2624,21 @@ def _diffuse_1d(phi, D, dx, lo=('none', 0.0), hi=('none', 0.0)):
     return (D_r * (p[2:] - p[1:-1]) - D_l * (p[1:-1] - p[:-2])) / dx**2
 
 
-def _diffuse_2d(phi, D, d, axis, bc_lo='none', bc_hi='none'):
-    """Conservative central d(D*dphi/d{axis})/d{axis} in 2D with ghost-cell padding."""
+def _diffuse_2d(phi, D, d, axis, bc_lo='none', bc_hi='none', g_lo=0.0, g_hi=0.0):
+    """
+    Conservative central d(D*dphi/d{axis})/d{axis} in 2D.
+
+    Same boundary treatment as _diffuse_1d, along `axis`: periodic edges
+    wrap; all other edges use the mirror ghost phi[1] + 2*d*g with g the
+    outward normal derivative (array along the edge, 0 = zero flux).
+    Dirichlet rows are overwritten afterwards by _apply_bcs.
+    """
     n       = phi.shape[axis]
-    phi_ext = _ghost_pad(phi, axis, bc_lo, bc_hi)
-    D_ext   = _ghost_pad(D,   axis, bc_lo, bc_hi)
+    D       = np.broadcast_to(np.asarray(D, dtype=float), phi.shape)
+    p_lo, p_hi = _mirror_ghosts(phi, axis, bc_lo, bc_hi, d, g_lo, g_hi)
+    D_lo, D_hi = _mirror_ghosts(D,   axis, bc_lo, bc_hi)
+    phi_ext = np.concatenate([p_lo, phi, p_hi], axis=axis)
+    D_ext   = np.concatenate([D_lo, D,   D_hi], axis=axis)
 
     phi_c = np.take(phi_ext, range(1, n+1), axis=axis)
     phi_r = np.take(phi_ext, range(2, n+2), axis=axis)
@@ -2582,40 +2658,10 @@ def _apply_bcs(eq, rhs, phi, t):
     Neumann 1D: nothing to do here -- _diffuse_1d applies the Neumann ghost
                 directly, so advection and source terms at the boundary
                 node are kept.
-    Neumann 2D: the _diffuse_2d stencil used a zero-gradient ghost (replicates
-                the boundary value), which gives zero normal flux by default.
-                Correct the boundary row here for any non-zero Neumann value.
+    Neumann 2D: likewise applied by _diffuse_2d (mirror ghost with the
+                prescribed outward derivative, scaled by D).
     """
     if eq.is_2d:
-        # --- Neumann 2D corrections ---
-        for bc in eq._bcs:
-            if bc.kind == 'neumann':
-                g = bc.get_value(t)
-                if g == 0.0:
-                    continue   # zero-gradient ghost was already correct
-                normal = bc.normal or _infer_normal_2d(bc.mask, phi.shape)
-                if normal == 'x-':
-                    # rhs[0,:] was computed with ghost=phi[0,:] (zero flux).
-                    # Correct: ghost = phi[1,:] - 2*g*dx  (outward normal = -x)
-                    # Delta = D_l*(phi[0]-phi_ghost_correct - phi[0]+phi_ghost_used)/dx^2
-                    #       = D_l*2*g*dx/dx^2 = 2*D*g/dx  (use D[0,:] as approx)
-                    # Simpler: just recompute rhs at the boundary row properly.
-                    rhs[0, :][bc.mask[0, :]] += (
-                        2.0 * g / eq.dx * np.ones(eq.ny)[bc.mask[0, :]]
-                    )
-                elif normal == 'x+':
-                    rhs[-1, :][bc.mask[-1, :]] -= (
-                        2.0 * g / eq.dx * np.ones(eq.ny)[bc.mask[-1, :]]
-                    )
-                elif normal == 'y-':
-                    rhs[:, 0][bc.mask[:, 0]] += (
-                        2.0 * g / eq.dy * np.ones(eq.nx)[bc.mask[:, 0]]
-                    )
-                elif normal == 'y+':
-                    rhs[:, -1][bc.mask[:, -1]] -= (
-                        2.0 * g / eq.dy * np.ones(eq.nx)[bc.mask[:, -1]]
-                    )
-
         # --- Dirichlet 2D: y-walls first, x-walls second (corners -> x wins) ---
         for bc in eq._bcs:
             if bc.kind == 'dirichlet' and bc.normal in ('y-', 'y+', None):

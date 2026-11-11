@@ -1142,6 +1142,11 @@ def my_rhs(Dx, Dy, **fields):
 
 > **Rule:** never nest operators — use `Dxx(phi)` not `Dx(Dx(phi))`.
 
+> **Boundaries:** operators use the boundary conditions of the equation they are called
+> in. `Div_flux_x`/`Div_flux_y` treat Neumann and unset walls exactly like
+> `add_diffusion`, so the two can be mixed freely. `Dx`, `Dy`, `Dxx`, `Dyy` use a
+> zero-gradient ghost at Neumann and unset walls, consistently with each other.
+
 ---
 
 ## Numerical Methods
