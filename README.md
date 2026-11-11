@@ -464,7 +464,8 @@ order there and creates no new maxima or minima:
 
 For `add_flux`, the reconstructed face states are combined with the local
 Lax–Friedrichs (Rusanov) flux, which reduces to plain upwinding for a linear flux and
-handles sonic points correctly (e.g. Burgers expansion fans through $u = 0$).
+handles sonic points correctly (e.g. Burgers expansion fans through $u = 0$). The
+first-order `'upwind'` flux is the same Rusanov flux with zero slopes.
 
 Notes:
 - In 2D the reconstruction is applied dimension by dimension (along $x$, then along $y$).
@@ -625,7 +626,7 @@ Burgers(field, x, viscosity=0.0, scheme='upwind')
 ```
 
 Written in conservation form with flux $F(u) = u^2/2$.
-Wave speed $a = u$ is inferred automatically; upwinding on `sign(a)`.
+Wave speed $a = u$ is inferred automatically and used in the upwind face flux.
 Set `viscosity=0` for the inviscid case (shock forms in finite time).
 For inviscid problems a limited scheme (e.g. `scheme='van_leer'`) keeps shocks sharp
 without oscillations; see [Advection Schemes](#advection-schemes).
@@ -663,8 +664,11 @@ ConservationLaw(field, x, flux, flux_y=None, scheme='upwind')
 | `flux_y` | Callable $G(u)$ — y-direction flux (2D only) |
 | `scheme` | `'upwind'` (default), `'central'`, or a limiter: `'minmod'`, `'van_leer'`, `'mc'`, `'superbee'` — see [Advection Schemes](#advection-schemes) |
 
-The wave speed $a = dF/du$ is inferred automatically via finite difference
-and used to select the upwind direction.
+The wave speed $a = dF/du$ is inferred automatically via finite difference.
+The default `'upwind'` scheme uses the local Lax–Friedrichs (Rusanov) face flux
+$F_{i+1/2} = \tfrac12(F_i + F_{i+1}) - \tfrac12\alpha\,(u_{i+1} - u_i)$ with
+$\alpha = \max(|a_i|, |a_{i+1}|)$: exact upwinding for a linear flux, conservative and
+entropy-correct where $a$ changes sign (e.g. traffic flow, Burgers with $u$ of both signs).
 
 ```python
 # LWR traffic flow: F(ρ) = ρ(1−ρ), wave speed a = 1−2ρ
@@ -1160,7 +1164,7 @@ def my_rhs(Dx, Dy, **fields):
 | `add_advection` (central) | Convective central | 2nd in space |
 | `add_advection` (limited) | MUSCL + slope limiter, TVD | 2nd in smooth regions, 1st at extrema |
 | `add_diffusion` | Conservative central | 2nd in space |
-| `add_flux` (upwind) | Donor-cell, wave speed inferred | 1st in space |
+| `add_flux` (upwind) | Rusanov (local Lax–Friedrichs) face flux, wave speed inferred | 1st in space |
 | `add_flux` (central) | Central flux divergence | 2nd in space |
 | `add_flux` (limited) | MUSCL + slope limiter, Rusanov face flux | 2nd in smooth regions, 1st at extrema |
 | `Dx`, `Dy` | Central difference | 2nd in space |

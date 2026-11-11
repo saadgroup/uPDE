@@ -761,7 +761,10 @@ class PDE:
         flux_y : callable(phi) -> ndarray   [2D, y-direction]
         scheme : 'upwind' (default) | 'central' |
                  'minmod' | 'van_leer' | 'superbee' | 'mc'
-            'upwind'  -- first-order donor cell on sign(dF/dphi)
+            'upwind'  -- first order: local Lax-Friedrichs (Rusanov) face
+                         flux on the nodal states; donor cell for a
+                         linear flux, conservative and entropy-correct
+                         where dF/dphi changes sign
             'central' -- second-order central difference of F
             limiter names -- second-order MUSCL reconstruction of phi at
                          cell faces with that slope limiter, combined with
@@ -2214,7 +2217,7 @@ class PDESystem:
                                                     bc_lo=bct['x-'], bc_hi=bct['x+'])
                         else:
                             a = _wave_speed(fn, phi)
-                            rhs -= _upwind_flux_2d(F, a, eq.dx, axis=0,
+                            rhs -= _upwind_flux_2d(F, a, phi, eq.dx, axis=0,
                                                    bc_lo=bct['x-'], bc_hi=bct['x+'])
                     if term.get('flux_y') is not None:
                         fn = term['flux_y']
@@ -2224,7 +2227,7 @@ class PDESystem:
                                                     bc_lo=bct['y-'], bc_hi=bct['y+'])
                         else:
                             a = _wave_speed(fn, phi)
-                            rhs -= _upwind_flux_2d(F, a, eq.dy, axis=1,
+                            rhs -= _upwind_flux_2d(F, a, phi, eq.dy, axis=1,
                                                    bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
                     fn = term['flux']
@@ -2239,7 +2242,7 @@ class PDESystem:
                         rhs -= _central_flux_1d(F, eq.dx, bc_lo, bc_lo)
                     else:
                         a = _wave_speed(fn, phi)
-                        rhs -= _upwind_flux_1d(F, a, eq.dx, bc_lo, bc_lo)
+                        rhs -= _upwind_flux_1d(F, a, phi, eq.dx, bc_lo, bc_lo)
 
             # --- Generic add_term callables ---
             if eq._generic_terms:
@@ -2468,37 +2471,38 @@ def _convect_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
     return c * np.where(c >= 0, dphi_bwd, dphi_fwd)
 
 
-def _upwind_flux_1d(F, a, dx, bc_lo='none', bc_hi='none'):
+def _upwind_flux(F, a, phi, d, axis=0, bc_lo='none', bc_hi='none'):
     """
-    Upwind flux differencing  dF/dx  in 1D.
-    Upwind direction determined by wave speed a = dF/dphi (not sign(F)).
-    Uses simple donor-cell: F_{i+1/2} = F_i if a>=0 else F_{i+1}.
+    First-order upwind flux differencing  dF/d{axis}  (1D or 2D) with the
+    local Lax-Friedrichs (Rusanov) face flux on the nodal states:
+
+        F_{i+1/2} = (F_i + F_{i+1})/2 - alpha/2 * (phi_{i+1} - phi_i),
+        alpha     = max(|a_i|, |a_{i+1}|),   a = dF/dphi.
+
+    One flux per face, so the scheme is conservative even where a changes
+    sign, and it spreads sonic expansion fans correctly (no stationary
+    expansion shock).  For a linear flux F = c*phi it is exactly donor-cell
+    upwinding.  This is the limited schemes' flux with zero slopes.
+
     Ghosts: wrapped for periodic, otherwise replicated (zero gradient).
     """
-    Fp   = _ghost_pad(F, 0, bc_lo, bc_hi)
-    F_l  = Fp[:-2]          # F[i-1]
-    F_r  = Fp[2:]           # F[i+1]
-    # face flux at i+1/2: upwind on a
-    F_iph = np.where(a >= 0, F,   F_r)   # right face
-    F_imh = np.where(a >= 0, F_l, F  )   # left face
-    return (F_iph - F_imh) / dx
+    n   = F.shape[axis]
+    Fe  = _ghost_pad(F,   axis, bc_lo, bc_hi)
+    ae  = np.abs(_ghost_pad(a, axis, bc_lo, bc_hi))
+    pe  = _ghost_pad(phi, axis, bc_lo, bc_hi)
+    lo  = _axis_slice(F.ndim, axis, 0, n + 1)      # node k-1 of face k
+    hi  = _axis_slice(F.ndim, axis, 1, n + 2)      # node k   of face k
+    Fh  = 0.5 * (Fe[lo] + Fe[hi]) - 0.5 * np.maximum(ae[lo], ae[hi]) * (pe[hi] - pe[lo])
+    return (Fh[_axis_slice(F.ndim, axis, 1, n + 1)]
+            - Fh[_axis_slice(F.ndim, axis, 0, n)]) / d
 
 
-def _upwind_flux_2d(F, a, d, axis, bc_lo='none', bc_hi='none'):
-    """
-    Upwind flux differencing  dF/d{axis}  in 2D.
-    Upwind direction determined by wave speed a = dF/dphi.
-    """
-    n     = F.shape[axis]
-    F_ext = _ghost_pad(F, axis, bc_lo, bc_hi)
-    a_ext = _ghost_pad(a, axis, bc_lo, bc_hi)
-    F_c   = np.take(F_ext, range(1, n+1), axis=axis)
-    F_r   = np.take(F_ext, range(2, n+2), axis=axis)
-    F_l   = np.take(F_ext, range(0, n),   axis=axis)
-    a_c   = np.take(a_ext, range(1, n+1), axis=axis)
-    F_iph = np.where(a_c >= 0, F_c, F_r)   # right face
-    F_imh = np.where(a_c >= 0, F_l, F_c)   # left face
-    return (F_iph - F_imh) / d
+def _upwind_flux_1d(F, a, phi, dx, bc_lo='none', bc_hi='none'):
+    return _upwind_flux(F, a, phi, dx, 0, bc_lo, bc_hi)
+
+
+def _upwind_flux_2d(F, a, phi, d, axis, bc_lo='none', bc_hi='none'):
+    return _upwind_flux(F, a, phi, d, axis, bc_lo, bc_hi)
 
 
 def _central_flux_1d(F, dx, bc_lo='none', bc_hi='none'):
