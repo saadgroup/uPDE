@@ -37,6 +37,7 @@ integrators without writing a single line of time-stepping code.
   - [2D Problems](#2d-problems)
   - [Interior Boundary Conditions](#interior-boundary-conditions)
   - [Choosing a Solver](#choosing-a-solver)
+  - [Steady-State Problems](#steady-state-problems)
 - [Pre-built Equations](#pre-built-equations)
   - [HeatEquation](#heatequation)
   - [AdvectionDiffusion](#advectiondiffusion)
@@ -72,8 +73,8 @@ pip install upde
 Or install from source for development:
 
 ```bash
-git clone https://github.com/tsaad-dev/upde.git
-cd upde
+git clone https://github.com/saadgroup/uPDE.git
+cd uPDE
 pip install -e .
 ```
 
@@ -138,16 +139,20 @@ sol = eq.solve(t_span=(0, 1), method='BDF')   # shorthand for uncoupled equation
 
 A `PDE` object holds the mathematical description of one equation: its field name,
 spatial grid, terms (advection, diffusion, source, flux), boundary conditions, and
-initial condition. It never solves anything on its own.
+initial condition.
 
-`PDE.solve()` is available as a convenience for equations that do not reference any
-external field. For coupled equations, use `PDESystem` explicitly.
+An uncoupled `PDE` (one that references no field other than its own) can be solved
+directly with `eq.solve(...)` for time-dependent problems or `eq.solve_steady(...)` for
+the steady state. Both are shorthand for `PDESystem([eq]).solve(...)` and
+`PDESystem([eq]).solve_steady(...)`. Coupled equations must be solved together through
+`PDESystem`; calling `solve()` or `solve_steady()` on them raises a `ValueError`.
 
 ### PDESystem — the solver
 
 `PDESystem` takes a list of `PDE` objects, validates that all field references are
-consistent, assembles the joint state vector, and calls `solve_ivp`. Even single-equation
-problems can use `PDESystem([eq]).solve(...)`.
+consistent, and assembles the joint state vector. `solve(...)` integrates the system in
+time with `solve_ivp`; `solve_steady(...)` solves directly for the steady state
+$\mathrm{RHS}(\phi) = 0$. Even single-equation problems can use `PDESystem([eq])`.
 
 ### PDESolution — the result
 
@@ -162,6 +167,9 @@ sol.success     # bool
 sol.message     # integrator status string
 sol.raw         # raw scipy OdeResult
 ```
+
+A steady solution has no time axis: `sol.T` has shape `(nx,)` in 1D and `(nx, ny)` in 2D.
+See [Steady-State Problems](#steady-state-problems).
 
 ---
 
@@ -245,6 +253,16 @@ eq.set_bc(kind='periodic', side='all')  # 2D — fully periodic
 | 2D | `'right'` | `i=-1` (all j) |
 | 2D | `'bottom'` | `j=0` (all i) |
 | 2D | `'top'` | `j=-1` (all i) |
+| 1D / 2D | `'all'` | Every edge — both ends in 1D, all four walls in 2D (scalar `value` only) |
+| 1D / 2D | `['left', 'right', ...]` | Each listed edge; `value` may be a scalar or a matching list |
+
+A later `set_bc` on a named side replaces any earlier BC on that side, so the natural
+pattern is a default followed by targeted overrides:
+
+```python
+eq.set_bc(side='all', kind='dirichlet', value=0.0)
+eq.set_bc(side='top', kind='neumann',   value=0.0)   # replaces the top-wall BC
+```
 
 #### Custom mask BCs (2D)
 
@@ -401,6 +419,50 @@ sol = PDESystem([eq]).solve(
     t_eval  = np.linspace(0, 1, 50),
 )
 ```
+
+---
+
+### Steady-State Problems
+
+`solve_steady()` skips time integration and solves $\mathrm{RHS}(\phi) = 0$ directly,
+where $\mathrm{RHS}$ is the same spatial operator (terms + boundary conditions) used by
+`solve()`. It is available on both `PDE` (uncoupled equations) and `PDESystem`.
+
+```python
+x  = np.linspace(0, 1, 101)
+eq = PDE('T', x=x)
+eq.add_diffusion(diffusivity=1.0)
+eq.add_source(expr=lambda x: 1.0)
+eq.set_bc(side='left',  kind='dirichlet', value=0.0)
+eq.set_bc(side='right', kind='dirichlet', value=0.0)
+
+sol = eq.solve_steady()   # sol.T has shape (nx,)
+```
+
+The initial condition is not used. To give the solver a starting point, pass `guess`:
+a scalar or array for `PDE.solve_steady`, or a dict `{field: scalar | array}` for
+`PDESystem.solve_steady` (unspecified fields default to zero).
+
+```python
+sol = PDESystem([eqA, eqB]).solve_steady(guess={'cA': 1.0, 'cB': 1.0})
+```
+
+**Method selection** (`method=`):
+
+| Method | Algorithm | Use when |
+|--------|-----------|----------|
+| `'auto'` (default) | Tests the RHS for linearity, then picks one of the two below | Almost always |
+| `'linear'` | One sparse linear solve | The RHS is linear in the fields |
+| `'nonlinear'` | Sparse Newton iteration; Jacobian by coloured finite differences | Nonlinear sources, coefficients, or coupling |
+
+For large linear 2D problems, `iterative=True` (with `method='linear'`) replaces the
+direct sparse LU with GMRES, preconditioned by algebraic multigrid if `pyamg` is installed
+and by incomplete LU otherwise. `maxiter` (default 50) caps the Newton iterations and
+`tol` (default `1e-8`) sets the convergence tolerance.
+
+Check convergence with `sol.success` and `sol.residual` ($\max|\mathrm{RHS}(\phi)|$ at the
+returned solution). A steady state must exist for the problem as posed: for example, pure
+diffusion with Neumann conditions on every boundary has no unique steady solution.
 
 ---
 
@@ -941,6 +1003,7 @@ PDE(field, x, y=None)
 | `set_interior_bc(mask, kind, value=)` | Interior obstacle BC |
 | `set_ic(ic)` | Initial condition: scalar, array, or callable |
 | `solve(t_span, **kwargs)` | Solve directly (uncoupled equations only) |
+| `solve_steady(guess=None, method='auto', tol=1e-8, **kwargs)` | Steady state directly (uncoupled equations only) |
 
 ---
 
@@ -952,8 +1015,16 @@ sol = PDESystem([eq1, eq2, ...]).solve(t_span, ICs=None, method='RK45',
                                        t_eval=None, **kwargs)
 ```
 
+```python
+sol = PDESystem([eq1, eq2, ...]).solve_steady(guess=None, method='auto', tol=1e-8,
+                                              iterative=False, maxiter=50)
+```
+
 Validates all field references at construction time.
-`**kwargs` are forwarded to `scipy.integrate.solve_ivp`.
+For `solve`, `**kwargs` are forwarded to `scipy.integrate.solve_ivp`.
+For `solve_steady`, `method` is `'auto'`, `'linear'`, or `'nonlinear'`; `iterative`
+applies to `'linear'` only and `maxiter` to `'nonlinear'` only.
+See [Steady-State Problems](#steady-state-problems).
 
 ---
 
@@ -966,6 +1037,17 @@ Validates all field references at construction time.
 | `sol.success` | `True` if the integrator reached `t_span[1]` |
 | `sol.message` | Integrator status string |
 | `sol.raw` | Raw `scipy.OdeResult` |
+
+Returned by `solve_steady()`:
+
+| Attribute | Description |
+|-----------|-------------|
+| `sol.<field>` | Steady field — shape `(nx,)` in 1D, `(nx, ny)` in 2D |
+| `sol.success` | `True` if the solver converged |
+| `sol.message` | Solver status string |
+| `sol.residual` | $\max\lvert\mathrm{RHS}(\phi)\rvert$ at the solution |
+| `sol.solver` | `'linear'` or `'nonlinear'` — the path actually taken |
+| `sol.nfev` | Number of RHS evaluations |
 
 ---
 
@@ -1042,8 +1124,8 @@ conditions before each stencil application.
 - Do not set it so large that the physical pressure gradient is smoothed away
 
 **`ValueError: references external field(s)`**
-- `PDE.solve()` only works for uncoupled equations
-- Use `PDESystem([eq1, eq2, ...]).solve(...)` for coupled problems
+- `PDE.solve()` and `PDE.solve_steady()` only work for uncoupled equations
+- Use `PDESystem([eq1, eq2, ...]).solve(...)` or `.solve_steady(...)` for coupled problems
 
 **Field not found in solution**
 - Check the field name string passed to `PDE(field, ...)` matches what you access on `sol`

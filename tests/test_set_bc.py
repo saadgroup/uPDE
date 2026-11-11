@@ -4,6 +4,7 @@ test_set_bc.py — tests for the extended set_bc API.
 Covers
 ------
   side='all'          — broadcasts scalar value to all walls (2D and 1D)
+  side='both'         — removed; rejected in 1D and 2D
   side=list           — sets multiple sides in one call, same or different values
   override semantics  — named-side registration removes prior BC for that wall
   mask= layering      — mask= always appends, enabling intentional overlap
@@ -228,3 +229,21 @@ class TestOverridePhysics:
         assert sol_list.success and sol_ind.success
         diff = np.max(np.abs(sol_list.T[:, -1] - sol_ind.T[:, -1]))
         assert diff < 1e-10, f"list vs individual set_bc mismatch: {diff:.2e}"
+
+
+
+# ---------------------------------------------------------------------------
+# side='both' — removed in favour of side='all'
+# ---------------------------------------------------------------------------
+
+class TestSideBothRemoved:
+
+    def test_1d_both_rejected(self):
+        eq = _eq1d()
+        with pytest.raises(ValueError, match="'all'"):
+            eq.set_bc(side="both", kind="dirichlet", value=0.0)
+
+    def test_2d_both_rejected(self):
+        eq = _eq2d()
+        with pytest.raises(ValueError):
+            eq.set_bc(side="both", kind="dirichlet", value=0.0)

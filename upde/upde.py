@@ -812,11 +812,12 @@ class PDE:
         Set a boundary condition.
 
         kind  : 'periodic' | 'dirichlet' | 'neumann'
-        side  : 1D : 'left' | 'right' | 'both'
+        side  : 1D : 'left' | 'right' | 'all'
                 2D : 'left' | 'right' | 'bottom' | 'top' | 'x' | 'y' | 'all'
-                     'x'   -- periodic in x  (left AND right walls)
-                     'y'   -- periodic in y  (bottom AND top walls)
-                     'all' -- apply to all four sides (scalar value only)
+                     'all' -- apply to every side: both ends in 1D, all four
+                              walls in 2D (scalar value only)
+                     'x'   -- periodic in x  (left AND right walls), 2D only
+                     'y'   -- periodic in y  (bottom AND top walls), 2D only
                      list  -- e.g. ['left', 'right'] to set multiple sides at once
                 (shorthand; ignored if mask= is given)
         mask  : bool ndarray matching the field shape (nx,) or (nx, ny)
@@ -964,7 +965,7 @@ class PDE:
 
         Called before registering a new named-side BC so that later set_bc
         calls cleanly override earlier ones for the same wall.
-        No-ops for compound sides ('both', 'x', 'y') — those are handled by
+        No-ops for compound sides ('x', 'y') — those are handled by
         their callers expanding into individual named sides.
         """
         target = self._SIDE_NORMAL.get(side)
@@ -1217,19 +1218,13 @@ class PDE:
             return mask, normal
         else:
             mask   = np.zeros(self.nx, dtype=bool)
-            normal_map = {
-                'left':  'x-', 'right': 'x+', 'both': None
-            }
             if side == 'left':
                 mask[0]  = True;  return mask, 'x-'
             elif side == 'right':
                 mask[-1] = True;  return mask, 'x+'
-            elif side == 'both':
-                mask[0]  = True
-                mask[-1] = True;  return mask, None
             else:
                 raise ValueError(
-                    f"In 1D, side must be 'left', 'right', or 'both'; got '{side}'"
+                    f"In 1D, side must be 'left', 'right', or 'all'; got '{side}'"
                 )
 
     def _coords(self):
