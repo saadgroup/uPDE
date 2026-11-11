@@ -151,7 +151,8 @@ def AdvectionDiffusion(field, x, y=None,
                        velocity=None,
                        velocity_x=None, velocity_y=None,
                        diffusivity=0.0,
-                       diffusivity_x=None, diffusivity_y=None):
+                       diffusivity_x=None, diffusivity_y=None,
+                       scheme='upwind'):
     """
     Advection-diffusion equation:
 
@@ -160,7 +161,8 @@ def AdvectionDiffusion(field, x, y=None,
         du/dt = -cx*∂u/∂x - cy*∂u/∂y
                 + ∂(Dx ∂u/∂x)/∂x + ∂(Dy ∂u/∂y)/∂y   [2D]
 
-    Advection: convective form, first-order upwind on sign(c).
+    Advection: convective form, upwinded on sign(c); spatial scheme set
+               by `scheme` (default first-order upwind).
     Diffusion: conservative central, face-averaged D.
 
     Parameters
@@ -172,6 +174,9 @@ def AdvectionDiffusion(field, x, y=None,
     velocity_x/y    : scalar | ndarray | callable | str  [2D]
     diffusivity     : scalar | ndarray | callable        [isotropic]
     diffusivity_x/y : scalar | ndarray | callable        [anisotropic 2D]
+    scheme          : 'upwind' (default) | 'central' |
+                      'minmod' | 'van_leer' | 'superbee' | 'mc'
+                      Advection scheme; see PDE.add_advection.
 
     Returns
     -------
@@ -195,10 +200,11 @@ def AdvectionDiffusion(field, x, y=None,
     # advection
     if y is not None:
         if velocity_x is not None or velocity_y is not None:
-            eq.add_advection(velocity_x=velocity_x, velocity_y=velocity_y)
+            eq.add_advection(velocity_x=velocity_x, velocity_y=velocity_y,
+                             scheme=scheme)
     else:
         if velocity is not None:
-            eq.add_advection(velocity=velocity)
+            eq.add_advection(velocity=velocity, scheme=scheme)
 
     # diffusion
     if diffusivity_x is not None or diffusivity_y is not None:
@@ -214,7 +220,7 @@ def AdvectionDiffusion(field, x, y=None,
 # 3. Burgers
 # ---------------------------------------------------------------------------
 
-def Burgers(field, x, viscosity=0.0):
+def Burgers(field, x, viscosity=0.0, scheme='upwind'):
     """
     Viscous (or inviscid) Burgers equation:
 
@@ -231,6 +237,9 @@ def Burgers(field, x, viscosity=0.0):
     field     : str    -- field name, e.g. 'u'
     x         : array  -- 1D coordinate array
     viscosity : float  -- kinematic viscosity nu (0 = inviscid)
+    scheme    : 'upwind' (default) | 'central' |
+                'minmod' | 'van_leer' | 'superbee' | 'mc'
+                Flux scheme; see PDE.add_flux.
 
     Returns
     -------
@@ -248,10 +257,12 @@ def Burgers(field, x, viscosity=0.0):
     For the inviscid case (viscosity=0) the solution develops a true
     discontinuity in finite time. The first-order upwind scheme adds
     numerical diffusion that regularises this, but the shock will still
-    sharpen considerably. Reduce the grid spacing to resolve it better.
+    sharpen considerably. A limited scheme (e.g. scheme='van_leer') keeps
+    the shock much sharper without oscillations, and also resolves
+    expansion fans through u = 0 correctly.
     """
     eq = PDE(field, x=x)
-    eq.add_flux(flux=lambda u: 0.5 * u**2)
+    eq.add_flux(flux=lambda u: 0.5 * u**2, scheme=scheme)
     if viscosity != 0.0:
         eq.add_diffusion(diffusivity=viscosity)
     return eq
@@ -277,7 +288,9 @@ def ConservationLaw(field, x, flux, flux_y=None, scheme='upwind'):
     x       : array
     flux    : callable(u) -> ndarray   [1D flux F, or 2D x-direction flux]
     flux_y  : callable(u) -> ndarray   [2D y-direction flux G, optional]
-    scheme  : 'upwind' (default) | 'central'
+    scheme  : 'upwind' (default) | 'central' |
+              'minmod' | 'van_leer' | 'superbee' | 'mc'
+              See PDE.add_flux.
 
     Returns
     -------

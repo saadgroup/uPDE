@@ -552,6 +552,28 @@ class PDESteadySolution:
 
 
 # ---------------------------------------------------------------------------
+# Spatial schemes for add_advection / add_flux
+# ---------------------------------------------------------------------------
+
+# Second-order MUSCL reconstruction with a slope limiter (TVD).
+_LIMITED_SCHEMES = ('minmod', 'van_leer', 'superbee', 'mc')
+_SCHEMES         = ('upwind', 'central') + _LIMITED_SCHEMES
+
+
+def _check_scheme(scheme, is_2d):
+    if scheme not in _SCHEMES:
+        raise ValueError(
+            f"scheme must be one of {', '.join(repr(s) for s in _SCHEMES)}; "
+            f"got {scheme!r}"
+        )
+    if is_2d and scheme in _LIMITED_SCHEMES:
+        raise NotImplementedError(
+            f"scheme={scheme!r} is currently available in 1D only. "
+            f"In 2D use 'upwind' or 'central'."
+        )
+
+
+# ---------------------------------------------------------------------------
 # PDE — single-field equation descriptor
 # ---------------------------------------------------------------------------
 
@@ -626,9 +648,10 @@ class PDE:
     # Public API: add terms
     # ------------------------------------------------------------------
 
-    def add_advection(self, velocity=None, velocity_x=None, velocity_y=None):
+    def add_advection(self, velocity=None, velocity_x=None, velocity_y=None,
+                      scheme='upwind'):
         """
-        Add convective advection term  c * d(phi)/d{x,y}  with first-order upwinding.
+        Add convective advection term  c * d(phi)/d{x,y}.
 
         The velocity c is the characteristic speed and sets the upwind direction
         via sign(c).  This is the strictly convective (non-conservative) form.
@@ -642,7 +665,18 @@ class PDE:
 
         velocity / velocity_x / velocity_y may each be:
             scalar | ndarray | callable(x[,y], **fields) | string field name
+
+        scheme : 'upwind' (default) | 'central' |
+                 'minmod' | 'van_leer' | 'superbee' | 'mc'
+            'upwind'  -- first order, monotone, dissipative
+            'central' -- second order, non-dissipative, oscillates at
+                         steep gradients
+            limiter names -- second-order MUSCL reconstruction with that
+                         slope limiter: second order in smooth regions,
+                         first order at extrema and discontinuities, no new
+                         oscillations (TVD).  1D only for now.
         """
+        _check_scheme(scheme, self.is_2d)
         if self.is_2d:
             if velocity_x is None and velocity_y is None:
                 raise ValueError(
@@ -651,11 +685,13 @@ class PDE:
             self._advection.append({
                 'velocity_x': _to_callable(velocity_x) if velocity_x is not None else None,
                 'velocity_y': _to_callable(velocity_y) if velocity_y is not None else None,
+                'scheme': scheme,
             })
         else:
             if velocity is None:
                 raise ValueError("In 1D use add_advection(velocity=...)")
-            self._advection.append({'velocity': _to_callable(velocity)})
+            self._advection.append({'velocity': _to_callable(velocity),
+                                    'scheme': scheme})
         return self
 
     def add_diffusion(self, diffusivity=None, diffusivity_x=None, diffusivity_y=None):
@@ -723,18 +759,23 @@ class PDE:
         flux   : callable(phi) -> ndarray   [1D]
         flux_x : callable(phi) -> ndarray   [2D, x-direction]
         flux_y : callable(phi) -> ndarray   [2D, y-direction]
-        scheme : 'upwind' (default) | 'central'
+        scheme : 'upwind' (default) | 'central' |
+                 'minmod' | 'van_leer' | 'superbee' | 'mc'
+            'upwind'  -- first-order donor cell on sign(dF/dphi)
+            'central' -- second-order central difference of F
+            limiter names -- second-order MUSCL reconstruction of phi at
+                         cell faces with that slope limiter, combined with
+                         the local Lax-Friedrichs (Rusanov) face flux.
+                         TVD; handles sonic points (e.g. Burgers expansion
+                         fans) correctly.  1D only for now.
 
         Notes
         -----
-        For upwind scheme, each flux callable must accept the field array
-        and return an array of the same shape.  The wave speed is inferred
-        automatically as dF/dphi via forward finite difference (eps=1e-6*max|phi|).
+        Each flux callable must accept the field array and return an array
+        of the same shape.  The wave speed is inferred automatically as
+        dF/dphi via forward finite difference (eps=1e-6*max|phi|).
         """
-        if scheme not in ('upwind', 'central'):
-            raise ValueError(
-                f"scheme must be 'upwind' or 'central'; got '{scheme}'"
-            )
+        _check_scheme(scheme, self.is_2d)
         if self.is_2d:
             if flux_x is None and flux_y is None:
                 raise ValueError(
@@ -1282,21 +1323,26 @@ def _is_linear(rhs_fn, y0, tol=1e-6):
     for all α and directions d.
 
     We test this with two random probe directions to reduce false-positive risk.
-    Cost: 5 RHS evaluations.
 
     Note: do NOT use F(α·y) ≈ α·F(y) — that tests homogeneous linearity
     and fails for affine functions with nonzero b (i.e., any problem with
     nonzero Dirichlet BCs).
+
+    The probes start from a random base point yb = y0 + e, not from y0.
+    Slope limiters are nonlinear but positively homogeneous
+    (sigma(α·d) = α·sigma(d)), so probing from y0 = 0 cannot detect them.
+    Cost: 5 RHS evaluations.
     """
     N  = len(y0)
     rng = np.random.default_rng(42)
 
-    f0 = rhs_fn(y0)
+    yb = y0 + rng.standard_normal(N)
+    f0 = rhs_fn(yb)
     for _ in range(2):
         d     = rng.standard_normal(N)
         alpha = 2.0
-        fa    = rhs_fn(y0 + alpha * d)
-        fd    = rhs_fn(y0 + d)
+        fa    = rhs_fn(yb + alpha * d)
+        fd    = rhs_fn(yb + d)
         # affine: F(y + α·d) - F(y)  should equal  α · (F(y + d) - F(y))
         lhs = fa - f0
         rhs = alpha * (fd - f0)
@@ -1310,7 +1356,8 @@ def _build_sparsity(equations):
     Build a sparse sparsity-pattern matrix for the coupled steady-state system.
 
     Each equation occupies a diagonal block corresponding to the 5-point (2D)
-    or 3-point (1D) stencil.  Field coupling (via add_source, add_term, etc.)
+    or 3-point (1D) stencil -- 5-point in 1D for limited (MUSCL) schemes, with
+    wrap-around entries for periodic 1D BCs.  Field coupling (via add_source, add_term, etc.)
     adds off-diagonal blocks between coupled equations — using a fully-dense
     block as a conservative upper bound.
 
@@ -1351,14 +1398,27 @@ def _build_sparsity(equations):
                 (np.ones(len(r), dtype=np.float64), (r, c)), shape=(ni, ni)
             )
         else:
+            # 3-point stencil, widened to 5 points for limited (MUSCL)
+            # schemes; periodic BCs add the wrap-around entries.
+            limited  = any(t.get('scheme') in _LIMITED_SCHEMES
+                           for t in eq._advection + eq._fluxes)
+            periodic = any(bc.kind == 'periodic' for bc in eq._bcs)
+            width    = 2 if limited else 1
             k = np.arange(ni)
             rows = [k]; cols = [k]
-            rows.append(k[:-1]); cols.append(k[1:])   # upper diagonal
-            rows.append(k[1:]); cols.append(k[:-1])   # lower diagonal
+            for off in range(1, width + 1):
+                for sgn in (1, -1):
+                    j = k + sgn * off
+                    if periodic:
+                        rows.append(k); cols.append(j % ni)
+                    else:
+                        m = (j >= 0) & (j < ni)
+                        rows.append(k[m]); cols.append(j[m])
             r = np.concatenate(rows); c = np.concatenate(cols)
             S = _sp.csr_matrix(
                 (np.ones(len(r), dtype=np.float64), (r, c)), shape=(ni, ni)
             )
+            S.data[:] = 1.0   # duplicates (tiny periodic grids) summed above
 
         blocks[i][i] = S
 
@@ -2019,20 +2079,29 @@ class PDESystem:
             # --- Advection: convective form  -c * dphi/d{x,y}, upwind on sign(c) ---
             bct = eq._bc_types_2d() if eq.is_2d else {}
             for term in eq._advection:
+                scheme = term.get('scheme', 'upwind')
                 if eq.is_2d:
+                    conv2d = _convect_central_2d if scheme == 'central' \
+                             else _convect_2d
                     if term['velocity_x'] is not None:
                         cx  = _call(term['velocity_x'], coords, fields_nd, t=t)
-                        rhs -= _convect_2d(phi, cx, eq.dx, axis=0,
-                                           bc_lo=bct['x-'], bc_hi=bct['x+'])
+                        rhs -= conv2d(phi, cx, eq.dx, axis=0,
+                                      bc_lo=bct['x-'], bc_hi=bct['x+'])
                     if term['velocity_y'] is not None:
                         cy  = _call(term['velocity_y'], coords, fields_nd, t=t)
-                        rhs -= _convect_2d(phi, cy, eq.dy, axis=1,
-                                           bc_lo=bct['y-'], bc_hi=bct['y+'])
+                        rhs -= conv2d(phi, cy, eq.dy, axis=1,
+                                      bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
                     c     = _call(term['velocity'], coords, fields_nd, t=t)
                     bc_lo = 'periodic' if any(bc.kind=='periodic' for bc in eq._bcs) else 'none'
                     bc_hi = bc_lo
-                    rhs  -= _convect_1d(phi, c, eq.dx, bc_lo, bc_hi)
+                    if scheme == 'upwind':
+                        rhs -= _convect_1d(phi, c, eq.dx, bc_lo, bc_hi)
+                    elif scheme == 'central':
+                        rhs -= _convect_central_1d(phi, c, eq.dx, bc_lo, bc_hi)
+                    else:
+                        rhs -= _convect_limited_1d(phi, c, eq.dx, scheme,
+                                                   bc_lo, bc_hi)
 
             # --- Diffusion ---
             for term in eq._diffusion:
@@ -2079,6 +2148,12 @@ class PDESystem:
                                                    bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
                     fn = term['flux']
+                    if term['scheme'] in _LIMITED_SCHEMES:
+                        bc_lo = 'periodic' if any(bc.kind == 'periodic'
+                                                  for bc in eq._bcs) else 'none'
+                        rhs -= _flux_limited_1d(fn, phi, eq.dx, term['scheme'],
+                                                bc_lo, bc_lo)
+                        continue
                     F  = fn(phi)
                     if term['scheme'] == 'central':
                         rhs -= _central_flux_1d(F, eq.dx)
@@ -2319,6 +2394,113 @@ def _central_flux_2d(F, d, axis, bc_lo='none', bc_hi='none'):
     F_r   = np.take(F_ext, range(2, n+2), axis=axis)
     F_l   = np.take(F_ext, range(0, n),   axis=axis)
     return (F_r - F_l) / (2.0 * d)
+
+
+def _convect_central_1d(phi, c, dx, bc_lo='none', bc_hi='none'):
+    """Convective form  c * dphi/dx  with second-order central differences."""
+    p = _ghost_pad(phi, 0, bc_lo, bc_hi)
+    return c * (p[2:] - p[:-2]) / (2.0 * dx)
+
+
+def _convect_central_2d(phi, c, d, axis, bc_lo='none', bc_hi='none'):
+    """Convective form  c * dphi/d{axis}  with second-order central differences."""
+    n       = phi.shape[axis]
+    phi_ext = _ghost_pad(phi, axis, bc_lo, bc_hi)
+    phi_r   = np.take(phi_ext, range(2, n+2), axis=axis)
+    phi_l   = np.take(phi_ext, range(0, n),   axis=axis)
+    return c * (phi_r - phi_l) / (2.0 * d)
+
+
+def _limited_slope(dm, dp, limiter):
+    """
+    Limited cell slope (times dx) from the backward and forward differences
+    dm = phi_i - phi_{i-1} and dp = phi_{i+1} - phi_i.
+
+    All four limiters return 0 at local extrema (dm*dp <= 0), which is what
+    makes the reconstruction TVD.  With r = dm/dp the slope equals
+    psi(r)*dp for the usual limiter function psi:
+      minmod   : psi = max(0, min(1, r))
+      van_leer : psi = (r + |r|) / (1 + |r|)
+      superbee : psi = max(0, min(2r, 1), min(r, 2))
+      mc       : psi = max(0, min(2r, (1 + r)/2, 2))
+    """
+    same = dm * dp > 0.0
+    s    = np.sign(dm)
+    am, ap = np.abs(dm), np.abs(dp)
+    if limiter == 'minmod':
+        out = s * np.minimum(am, ap)
+    elif limiter == 'van_leer':
+        denom = np.where(same, dm + dp, 1.0)
+        out   = 2.0 * dm * dp / denom
+    elif limiter == 'superbee':
+        out = s * np.maximum(np.minimum(2.0 * am, ap), np.minimum(am, 2.0 * ap))
+    elif limiter == 'mc':
+        out = s * np.minimum(np.minimum(2.0 * am, 2.0 * ap), 0.5 * (am + ap))
+    else:
+        raise ValueError(f"unknown limiter {limiter!r}")
+    return np.where(same, out, 0.0)
+
+
+def _muscl_faces_1d(phi, limiter, bc_lo='none', bc_hi='none'):
+    """
+    MUSCL reconstruction of phi at the n+1 faces of a 1D grid of n nodes.
+
+    Returns (uL, uR), each of length n+1: face k sits between node k-1 and
+    node k (face 0 is left of node 0, face n is right of node n-1).
+      uL[k] -- value extrapolated from the left  cell (node k-1)
+      uR[k] -- value extrapolated from the right cell (node k)
+
+    Two ghost cells per side: wrapped for periodic, otherwise replicated
+    (zero gradient).  Replicated ghosts give a zero limited slope in the
+    boundary cells, so the scheme falls back to first-order upwind there.
+    """
+    if bc_lo == 'periodic':
+        lo = phi[-2:]
+    else:
+        lo = np.full(2, phi[0])
+    if bc_hi == 'periodic':
+        hi = phi[:2]
+    else:
+        hi = np.full(2, phi[-1])
+    p  = np.concatenate([lo, phi, hi])            # nodes -2 .. n+1
+    dm = p[1:-1] - p[:-2]                         # nodes -1 .. n
+    dp = p[2:]   - p[1:-1]
+    sig = _limited_slope(dm, dp, limiter)         # nodes -1 .. n
+    pc  = p[1:-1]
+    uL  = pc[:-1] + 0.5 * sig[:-1]                # from nodes -1 .. n-1
+    uR  = pc[1:]  - 0.5 * sig[1:]                 # from nodes  0 .. n
+    return uL, uR
+
+
+def _convect_limited_1d(phi, c, dx, limiter, bc_lo='none', bc_hi='none'):
+    """
+    Convective form  c * dphi/dx  with limited (TVD) MUSCL reconstruction.
+    Upwind side chosen by sign(c) at the node.  For constant c this is the
+    standard conservative MUSCL scheme for linear advection.
+    """
+    uL, uR = _muscl_faces_1d(phi, limiter, bc_lo, bc_hi)
+    d_pos  = (uL[1:] - uL[:-1]) / dx              # c >= 0: left-biased faces
+    d_neg  = (uR[1:] - uR[:-1]) / dx              # c <  0: right-biased faces
+    return c * np.where(c >= 0, d_pos, d_neg)
+
+
+def _flux_limited_1d(flux_fn, phi, dx, limiter, bc_lo='none', bc_hi='none'):
+    """
+    dF/dx with limited MUSCL face states and the local Lax-Friedrichs
+    (Rusanov) face flux
+
+        F_face = (F(uL) + F(uR))/2 - alpha/2 * (uR - uL),
+        alpha  = max(|F'(uL)|, |F'(uR)|).
+
+    For a linear flux F = c*phi this reduces exactly to upwinding the
+    reconstructed states.
+    """
+    uL, uR = _muscl_faces_1d(phi, limiter, bc_lo, bc_hi)
+    FL, FR = flux_fn(uL), flux_fn(uR)
+    alpha  = np.maximum(np.abs(_wave_speed(flux_fn, uL)),
+                        np.abs(_wave_speed(flux_fn, uR)))
+    Fh     = 0.5 * (FL + FR) - 0.5 * alpha * (uR - uL)
+    return (Fh[1:] - Fh[:-1]) / dx
 
 
 def _diffuse_1d(phi, D, dx):

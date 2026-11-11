@@ -37,6 +37,7 @@ integrators without writing a single line of time-stepping code.
   - [2D Problems](#2d-problems)
   - [Interior Boundary Conditions](#interior-boundary-conditions)
   - [Choosing a Solver](#choosing-a-solver)
+  - [Advection Schemes](#advection-schemes)
   - [Steady-State Problems](#steady-state-problems)
 - [Pre-built Equations](#pre-built-equations)
   - [HeatEquation](#heatequation)
@@ -422,6 +423,51 @@ sol = PDESystem([eq]).solve(
 
 ---
 
+### Advection Schemes
+
+`add_advection` and `add_flux` take a `scheme` keyword that sets the spatial
+discretisation of the advective term:
+
+| `scheme` | Order | Character |
+|----------|-------|-----------|
+| `'upwind'` (default) | 1st | Monotone, but smears fronts (numerical diffusion $\tfrac{c\,\Delta x}{2}\,\partial_{xx}$) |
+| `'central'` | 2nd | No numerical diffusion, but oscillates at steep gradients |
+| `'minmod'`, `'van_leer'`, `'mc'`, `'superbee'` | 2nd in smooth regions | Limited (TVD): sharp fronts, no new oscillations |
+
+```python
+eq.add_advection(velocity=1.0, scheme='van_leer')
+eq.add_flux(flux=lambda u: 0.5 * u**2, scheme='superbee')
+```
+
+The limited schemes use MUSCL reconstruction. Each cell gets a limited slope
+$\sigma_i = \psi(r_i)\,(\phi_{i+1} - \phi_i)$ with
+$r_i = (\phi_i - \phi_{i-1})/(\phi_{i+1} - \phi_i)$, and the face values are
+extrapolated from the upwind cell, e.g. $\phi_{i+1/2}^{L} = \phi_i + \tfrac{1}{2}\sigma_i$.
+The limiter $\psi(r)$ is zero at local extrema ($r \le 0$), so the scheme drops to first
+order there and creates no new maxima or minima:
+
+| Limiter | $\psi(r)$ for $r > 0$ | Behaviour |
+|---------|----------------------|-----------|
+| `'minmod'` | $\min(1, r)$ | Most diffusive, very robust |
+| `'van_leer'` | $\dfrac{2r}{1 + r}$ | Smooth, good general-purpose choice |
+| `'mc'` | $\min(2r, \tfrac{1+r}{2}, 2)$ | Sharper than van Leer |
+| `'superbee'` | $\max\big(\min(2r, 1), \min(r, 2)\big)$ | Sharpest; tends to square off smooth peaks |
+
+For `add_flux`, the reconstructed face states are combined with the local
+Lax–Friedrichs (Rusanov) flux, which reduces to plain upwinding for a linear flux and
+handles sonic points correctly (e.g. Burgers expansion fans through $u = 0$).
+
+Notes:
+- **1D only** for now. In 2D the limited schemes raise `NotImplementedError`.
+- Boundary cells fall back to first-order upwind (except with periodic BCs).
+- Limited schemes are nonlinear in $\phi$ even for linear advection, so
+  `solve_steady(method='auto')` uses the Newton solver.
+- The no-new-oscillations property is formally guaranteed with strong-stability-preserving
+  (SSP) time integrators. The adaptive `solve_ivp` methods are not SSP but behave well at
+  typical tolerances.
+
+---
+
 ### Steady-State Problems
 
 `solve_steady()` skips time integration and solves $\mathrm{RHS}(\phi) = 0$ directly,
@@ -533,10 +579,12 @@ $$\frac{\partial T}{\partial t} + c\,\frac{\partial T}{\partial x}
 AdvectionDiffusion(field, x, y=None,
                    velocity=None, velocity_x=None, velocity_y=None,
                    diffusivity=0.0,
-                   diffusivity_x=None, diffusivity_y=None)
+                   diffusivity_x=None, diffusivity_y=None,
+                   scheme='upwind')
 ```
 
-Advection uses the convective form with first-order upwinding on `sign(c)`.
+Advection uses the convective form, upwinded on `sign(c)`; `scheme` selects the
+discretisation (see [Advection Schemes](#advection-schemes)).
 Diffusion is conservative central.
 All coefficients may be scalars, arrays, callables, or string field names
 (for coupling to a velocity field from another equation).
@@ -564,12 +612,14 @@ $$\frac{\partial u}{\partial t} + \frac{\partial}{\partial x}\!\left(\frac{u^2}{
 = \nu\,\frac{\partial^2 u}{\partial x^2}$$
 
 ```python
-Burgers(field, x, viscosity=0.0)
+Burgers(field, x, viscosity=0.0, scheme='upwind')
 ```
 
 Written in conservation form with flux $F(u) = u^2/2$.
 Wave speed $a = u$ is inferred automatically; upwinding on `sign(a)`.
 Set `viscosity=0` for the inviscid case (shock forms in finite time).
+For inviscid problems a limited scheme (e.g. `scheme='van_leer'`) keeps shocks sharp
+without oscillations; see [Advection Schemes](#advection-schemes).
 **1D only.**
 
 ```python
@@ -602,7 +652,7 @@ ConservationLaw(field, x, flux, flux_y=None, scheme='upwind')
 |-----------|-------------|
 | `flux` | Callable $F(u)$ — 1D flux, or x-direction flux in 2D |
 | `flux_y` | Callable $G(u)$ — y-direction flux (2D only) |
-| `scheme` | `'upwind'` (default) or `'central'` |
+| `scheme` | `'upwind'` (default), `'central'`, or a limiter: `'minmod'`, `'van_leer'`, `'mc'`, `'superbee'` (1D) — see [Advection Schemes](#advection-schemes) |
 
 The wave speed $a = dF/du$ is inferred automatically via finite difference
 and used to select the upwind direction.
@@ -991,8 +1041,8 @@ PDE(field, x, y=None)
 
 | Method | Description |
 |--------|-------------|
-| `add_advection(velocity=)` | 1D convective form $-c\,\partial_x\phi$, upwind on sign(c) |
-| `add_advection(velocity_x=, velocity_y=)` | 2D convective form |
+| `add_advection(velocity=, scheme=)` | 1D convective form $-c\,\partial_x\phi$, upwind on sign(c) |
+| `add_advection(velocity_x=, velocity_y=, scheme=)` | 2D convective form |
 | `add_diffusion(diffusivity=)` | Isotropic diffusion $\nabla\cdot(D\nabla\phi)$ |
 | `add_diffusion(diffusivity_x=, diffusivity_y=)` | Anisotropic diffusion |
 | `add_source(expr=)` | Pointwise source $S(x[,y], \texttt{**fields})$ |
@@ -1092,10 +1142,13 @@ def my_rhs(Dx, Dy, **fields):
 
 | Term | Scheme | Order |
 |------|--------|-------|
-| `add_advection` | Convective upwind | 1st in space |
+| `add_advection` (upwind) | Convective upwind | 1st in space |
+| `add_advection` (central) | Convective central | 2nd in space |
+| `add_advection` (limited, 1D) | MUSCL + slope limiter, TVD | 2nd in smooth regions, 1st at extrema |
 | `add_diffusion` | Conservative central | 2nd in space |
 | `add_flux` (upwind) | Donor-cell, wave speed inferred | 1st in space |
 | `add_flux` (central) | Central flux divergence | 2nd in space |
+| `add_flux` (limited, 1D) | MUSCL + slope limiter, Rusanov face flux | 2nd in smooth regions, 1st at extrema |
 | `Dx`, `Dy` | Central difference | 2nd in space |
 | `Dxx`, `Dyy` | Central difference | 2nd in space |
 | `Div_x`, `Div_y` | Central conservative | 2nd in space |
@@ -1112,6 +1165,10 @@ conditions before each stencil application.
 - Switch to `method='BDF'` for diffusion-dominated or stiff problems
 - Loosen tolerances: `rtol=1e-3, atol=1e-5`
 - Check that BCs are consistent with the IC at `t=0`
+
+**Fronts or shocks are smeared**
+- First-order `'upwind'` adds numerical diffusion $\tfrac{c\,\Delta x}{2}\,\partial_{xx}$
+- Use a limited scheme, e.g. `add_advection(velocity=c, scheme='van_leer')` (1D)
 
 **Solution blows up**
 - Add or increase diffusivity to stabilise advection
