@@ -291,12 +291,11 @@ pre#codebox { font-family:var(--mono); font-size:11.5px; line-height:1.7; color:
       <div class="sb-label">Steady-state solver</div>
       <label>method</label>
       <select id="steady-method" onchange="render()">
-        <option value="hybr">hybr (default)</option>
-        <option value="lm">lm — Levenberg-Marquardt</option>
-        <option value="krylov">krylov — large systems</option>
-        <option value="broyden1">broyden1 — Broyden</option>
+        <option value="auto">auto (default) — detects linearity</option>
+        <option value="linear">linear — one sparse solve</option>
+        <option value="nonlinear">nonlinear — sparse Newton</option>
       </select>
-      <div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.5">Guess set via IC row below.<br>Check sol.residual for convergence.</div>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.5">Guess set via IC row below (used by Newton).<br>Check sol.success and sol.residual.</div>
     </div>
     <div class="sb-ctrl">
       <div class="sb-label">Grid</div>
@@ -504,7 +503,7 @@ function defaultParams(type, fname, allFields) {
   const coupledArgs = others.length ? ', ' + others.join(', ') : '';
   const srcArgs  = `x, t, ${fname}${coupledArgs}`;
   const custArgs = `${fname}${coupledArgs}, t, Dx, Dxx`;
-  if (type==='advection') return d2?{velocity_x:'1.0',velocity_y:'0.0'}:{velocity:'1.0'};
+  if (type==='advection') return d2?{velocity_x:'1.0',velocity_y:'0.0',scheme:'upwind'}:{velocity:'1.0',scheme:'upwind'};
   if (type==='diffusion') return {diffusivity:'0.01'};
   if (type==='source')    return {expr:`lambda ${srcArgs}: 0.0`};
   if (type==='flux')      return d2
@@ -553,14 +552,24 @@ function removeTerm(fid, tid) {
 
 /* ── IC ── */
 function icExprFor(f) {
-  const ic=f.ic||{preset:'zero',custom:''};
+  /* 2D callables receive (x, y) as meshgrid arrays, so presets must take both */
+  const ic=f.ic||{preset:'zero',custom:''}, d2=is2d();
   if (ic.preset==='zero')   return '0.0';
   if (ic.preset==='one')    return '1.0';
-  if (ic.preset==='sin')    return 'lambda x: np.sin(np.pi * x)';
-  if (ic.preset==='gauss')  return 'lambda x: np.exp(-((x - 0.5)**2) / 0.02)';
-  if (ic.preset==='step')   return 'lambda x: (x < 0.5).astype(float)';
-  if (ic.preset==='custom') return ic.custom||'lambda x: 0.0';
+  if (ic.preset==='sin')    return d2 ? 'lambda x, y: np.sin(np.pi * x) * np.sin(np.pi * y)'
+                                      : 'lambda x: np.sin(np.pi * x)';
+  if (ic.preset==='gauss')  return d2 ? 'lambda x, y: np.exp(-((x - 0.5)**2 + (y - 0.5)**2) / 0.02)'
+                                      : 'lambda x: np.exp(-((x - 0.5)**2) / 0.02)';
+  if (ic.preset==='step')   return d2 ? 'lambda x, y: (x < 0.5).astype(float) + 0.0 * y'
+                                      : 'lambda x: (x < 0.5).astype(float)';
+  if (ic.preset==='custom') return ic.custom||(d2 ? 'lambda x, y: 0.0 * x' : 'lambda x: 0.0');
   return '0.0';
+}
+/* solve_steady takes guess as a scalar or array: evaluate callables on the grid */
+function guessExprFor(f) {
+  const e = icExprFor(f);
+  if (!/^\s*lambda\b/.test(e)) return e;
+  return is2d() ? `(${e})(X, Y)` : `(${e})(x)`;
 }
 function onIcChange(fid, sel) {
   const f=fields.find(x=>x.id===fid); if (!f) return;
@@ -719,7 +728,9 @@ function openTermModal(fid, tid) {
     body = d2
       ? mf('velocity_x',p.velocity_x||'1.0')+mf('velocity_y',p.velocity_y||'0.0')
       : mf('velocity',p.velocity||'1.0');
+    body += ms('scheme',p.scheme||'upwind',['upwind','central','minmod','van_leer','mc','superbee']);
     body += mh(`scalar, callable(x[,y], t, **fields), or field name string, e.g. '${n}'${couplingNote}`);
+    body += mh(SCHEME_HINT);
   } else if (t.type==='diffusion') {
     body = d2
       ? mf('diffusivity (isotropic)',p.diffusivity||'0.01')
@@ -734,10 +745,11 @@ function openTermModal(fid, tid) {
     body = d2
       ? mf('flux_x',p.flux_x||`lambda ${n}: 0.5*${n}**2`)
         +mf('flux_y',p.flux_y||`lambda ${n}: 0.5*${n}**2`)
-        +ms('scheme',p.scheme||'upwind',['upwind','central'])
+        +ms('scheme',p.scheme||'upwind',['upwind','central','minmod','van_leer','mc','superbee'])
       : mf('flux',p.flux||`lambda ${n}: 0.5*${n}**2`)
-        +ms('scheme',p.scheme||'upwind',['upwind','central']);
+        +ms('scheme',p.scheme||'upwind',['upwind','central','minmod','van_leer','mc','superbee']);
     body += mh(`flux(${n}) → ndarray of same shape; wave speed inferred automatically`);
+    body += mh(SCHEME_HINT);
   } else if (t.type==='custom') {
     body = mf('fn', p.fn||`lambda ${custArgs}: 0.0`);
     body += mh(`args injected by name: t (solver time), Dx, Dy, Dxx, Dyy, Div_x, Div_y${couplingNote}`);
@@ -752,7 +764,7 @@ function saveTermModal(fid, tid, type) {
   const g=key=>{ const el=document.getElementById('mf_'+key.replace(/[^a-z0-9]/gi,'_')); return el?el.value.trim():''; };
 
   if (type==='advection') {
-    t.params=d2?{velocity_x:g('velocity_x'),velocity_y:g('velocity_y')}:{velocity:g('velocity')};
+    t.params=d2?{velocity_x:g('velocity_x'),velocity_y:g('velocity_y'),scheme:g('scheme')}:{velocity:g('velocity'),scheme:g('scheme')};
   } else if (type==='diffusion') {
     if (d2) {
       const dx=g('diffusivity_x__overrides_above_'), dy=g('diffusivity_y__overrides_above_');
@@ -772,7 +784,9 @@ function saveTermModal(fid, tid, type) {
 /* ── BC modal ── */
 function openBCModal(fid, side) {
   const f=fields.find(x=>x.id===fid), bc=f.bcs[side]||{kind:'neumann',value:'0.0'};
-  const body=ms('kind',bc.kind,['dirichlet','neumann','periodic'])+mf('value',bc.value||'0.0');
+  const body=ms('kind',bc.kind,['dirichlet','neumann','periodic'])+mf('value',bc.value||'0.0')
+    +mh('neumann: value is the OUTWARD normal derivative ∂φ/∂n (left/bottom: −∂φ/∂x, −∂φ/∂y; right/top: +∂φ/∂x, +∂φ/∂y). '
+       +'With diffusion D, a positive value is an influx D·value. 0 = zero flux.');
   showModal(`${side} BC — field ${f.name}`, body, ()=>{
     const kind=document.getElementById('mf_kind').value;
     const value=document.getElementById('mf_value').value.trim();
@@ -793,6 +807,9 @@ function ms(label, val, opts) {
   const id='mf_'+label.replace(/[^a-z0-9]/gi,'_');
   return `<div class="modal-field"><label>${label}</label><select id="${id}">${opts.map(o=>`<option${o===val?' selected':''}>${o}</option>`).join('')}</select></div>`;
 }
+const SCHEME_HINT = 'upwind: 1st order, smears fronts · central: 2nd order, oscillates at jumps · '
+  + 'minmod / van_leer / mc / superbee: 2nd-order TVD limiters — sharp fronts, no oscillations '
+  + '(minmod most diffusive → superbee sharpest; van_leer is a good default)';
 function mh(text) { return `<div class="modal-field"><div class="modal-hint">${text}</div></div>`; }
 
 let _ok=null;
@@ -818,8 +835,8 @@ function closeModal() {
 function termCodeHTML(f, t) {
   const n=f.name, p=t.params, d2=is2d();
   if (t.type==='advection') return d2
-    ?`eq_${n}.add_advection(velocity_x=<span class="st">${esc(p.velocity_x||'1.0')}</span>, velocity_y=<span class="st">${esc(p.velocity_y||'0.0')}</span>)`
-    :`eq_${n}.add_advection(velocity=<span class="st">${esc(p.velocity||'1.0')}</span>)`;
+    ?`eq_${n}.add_advection(velocity_x=<span class="st">${esc(p.velocity_x||'1.0')}</span>, velocity_y=<span class="st">${esc(p.velocity_y||'0.0')}</span>, scheme=<span class="st">'${p.scheme||'upwind'}'</span>)`
+    :`eq_${n}.add_advection(velocity=<span class="st">${esc(p.velocity||'1.0')}</span>, scheme=<span class="st">'${p.scheme||'upwind'}'</span>)`;
   if (t.type==='diffusion') return p.diffusivity_x
     ?`eq_${n}.add_diffusion(diffusivity_x=<span class="st">${esc(p.diffusivity_x)}</span>, diffusivity_y=<span class="st">${esc(p.diffusivity_y)}</span>)`
     :`eq_${n}.add_diffusion(diffusivity=<span class="st">${esc(p.diffusivity||'0.01')}</span>)`;
@@ -1027,7 +1044,7 @@ const _buildCodeHTML = buildCodeHTML;
 buildCodeHTML = function() {
   if (solveMode !== 'steady') return _buildCodeHTML();
   const d2 = is2d();
-  const method = (gv('steady-method')||'hybr').split(' ')[0];
+  const method = (gv('steady-method')||'auto').split(' ')[0];
   const gx0=gv('gx0')||'0', gx1=gv('gx1')||'1', gn=gv('gn')||'64';
   const gy0=gv('gy0')||'0', gy1=gv('gy1')||'1', gny=gv('gny')||'64';
   const L = [];
@@ -1057,11 +1074,13 @@ buildCodeHTML = function() {
   const guessFields = fields.filter(f=>f.ic&&f.ic.preset!=='zero');
   if (guessFields.length) {
     L.push('<span class="cm"># initial guess for Newton solver</span>');
+    if (d2 && guessFields.some(f=>/^\s*lambda\b/.test(icExprFor(f))))
+      L.push('X, Y = np.meshgrid(x, y, indexing=<span class="st">\'ij\'</span>)');
     if (fields.length===1) {
-      L.push('guess = <span class="st">'+esc(icExprFor(guessFields[0]))+'</span>');
+      L.push('guess = <span class="st">'+esc(guessExprFor(guessFields[0]))+'</span>');
     } else {
       L.push('guess = {');
-      guessFields.forEach(f => L.push('    <span class="st">\''+f.name+'\'</span>: <span class="st">'+esc(icExprFor(f))+'</span>,'));
+      guessFields.forEach(f => L.push('    <span class="st">\''+f.name+'\'</span>: <span class="st">'+esc(guessExprFor(f))+'</span>,'));
       L.push('}');
     }
     L.push('');
@@ -1075,8 +1094,8 @@ buildCodeHTML = function() {
   L.push('    method=<span class="st">\''+method+'\'</span>,');
   L.push(')');
   L.push('');
-  L.push('<span class="cm"># check convergence — use residual, not sol.success</span>');
-  L.push('<span class="cm"># print(f\'residual: {sol.residual:.2e}\')  # target &lt; 1e-8</span>');
+  L.push('<span class="cm"># check convergence</span>');
+  L.push('<span class="cm"># print(sol.success, f\'residual: {sol.residual:.2e}\', sol.solver)</span>');
   L.push('');
   fields.forEach(f => L.push('<span class="cm"># sol.'+f.name+'  shape ('+(d2?'nx, ny':'nx,')+')</span>'));
   return L.join('\n');
