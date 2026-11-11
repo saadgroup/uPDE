@@ -191,7 +191,7 @@ def _callable_field_refs(fn):
 # Differential operators — BC-aware, injected into add_term callables
 # ---------------------------------------------------------------------------
 
-def _build_operators(eq, fields_nd, bct):
+def _build_operators(eq, fields_nd, bct, t=0.0):
     """
     Build BC-aware differential operators for use inside add_term callables.
 
@@ -362,7 +362,8 @@ def _build_operators(eq, fields_nd, bct):
             raise NotImplementedError("Div_y is not defined for 1D problems.")
 
         def Div_flux_x(k, phi):
-            return _diffuse_1d(_resolve(phi), _resolve(k), dx)
+            lo, hi = eq._bc_1d(t)
+            return _diffuse_1d(_resolve(phi), _resolve(k), dx, lo, hi)
 
         def Div_flux_y(k, phi):
             raise NotImplementedError("Div_flux_y is not defined for 1D problems.")
@@ -1274,6 +1275,28 @@ class PDE:
             return (self.X, self.Y)
         return (self.x1d,)
 
+    def _bc_1d(self, t):
+        """
+        Boundary description for the two ends of a 1D grid at time t.
+
+        Returns ((kind_lo, g_lo), (kind_hi, g_hi)) with kind one of
+        'periodic' | 'dirichlet' | 'neumann' | 'none'.  g is the prescribed
+        outward normal derivative for 'neumann' (0.0 otherwise).  Later
+        registrations win, matching set_bc override semantics.
+        """
+        if any(bc.kind == 'periodic' for bc in self._bcs):
+            return ('periodic', 0.0), ('periodic', 0.0)
+        lo, hi = ('none', 0.0), ('none', 0.0)
+        for bc in self._bcs:
+            if bc.kind not in ('dirichlet', 'neumann'):
+                continue
+            g = bc.get_value(t) if bc.kind == 'neumann' else 0.0
+            if bc.mask[0]:
+                lo = (bc.kind, g)
+            if bc.mask[-1]:
+                hi = (bc.kind, g)
+        return lo, hi
+
     def _bc_types_2d(self):
         """
         Return the BC kind for each of the four 2D edges.
@@ -2116,7 +2139,8 @@ class PDESystem:
                                            bc_lo=bct['y-'], bc_hi=bct['y+'])
                 else:
                     D    = _call(term['diffusivity'], coords, fields_nd, t=t)
-                    rhs += _diffuse_1d(phi, D, eq.dx)
+                    lo, hi = eq._bc_1d(t)
+                    rhs += _diffuse_1d(phi, D, eq.dx, lo, hi)
 
             # --- Sources ---
             for term in eq._sources:
@@ -2163,7 +2187,7 @@ class PDESystem:
 
             # --- Generic add_term callables ---
             if eq._generic_terms:
-                ops = _build_operators(eq, fields_nd, bct if eq.is_2d else {})
+                ops = _build_operators(eq, fields_nd, bct if eq.is_2d else {}, t=t)
                 for fn in eq._generic_terms:
                     sig    = inspect.signature(fn)
                     params = sig.parameters
@@ -2503,13 +2527,35 @@ def _flux_limited_1d(flux_fn, phi, dx, limiter, bc_lo='none', bc_hi='none'):
     return (Fh[1:] - Fh[:-1]) / dx
 
 
-def _diffuse_1d(phi, D, dx):
-    """Conservative central d(D·dphi/dx)/dx in 1D."""
-    D_r   = 0.5 * (D + np.roll(D, -1))
-    D_l   = 0.5 * (D + np.roll(D,  1))
-    phi_r = np.roll(phi, -1)
-    phi_l = np.roll(phi,  1)
-    return (D_r * (phi_r - phi) - D_l * (phi - phi_l)) / dx**2
+def _diffuse_1d(phi, D, dx, lo=('none', 0.0), hi=('none', 0.0)):
+    """
+    Conservative central d(D·dphi/dx)/dx in 1D.
+
+    lo / hi : (kind, g) for each end, as returned by PDE._bc_1d.
+      'periodic'            -- wrap around
+      'neumann' (g)         -- mirror ghost  phi_-1 = phi_1 + 2*dx*g, where g
+                               is the outward normal derivative.  At the
+                               boundary node this gives the half-cell balance
+                               2*D_f*(phi_1 - phi_0)/dx^2 + 2*D_f*g/dx.
+      'dirichlet' / 'none'  -- mirror ghost with g = 0 (zero flux).  Dirichlet
+                               rows are overwritten by _apply_bcs; a side with
+                               no BC is therefore a natural zero-flux wall.
+    """
+    phi = np.asarray(phi, dtype=float)
+    D   = np.broadcast_to(np.asarray(D, dtype=float), phi.shape)
+    if lo[0] == 'periodic':
+        g_lo, D_lo = phi[-1], D[-1]
+    else:
+        g_lo, D_lo = phi[1] + 2.0 * dx * lo[1], D[1]
+    if hi[0] == 'periodic':
+        g_hi, D_hi = phi[0], D[0]
+    else:
+        g_hi, D_hi = phi[-2] + 2.0 * dx * hi[1], D[-2]
+    p  = np.concatenate([[g_lo], phi, [g_hi]])
+    De = np.concatenate([[D_lo], D,   [D_hi]])
+    D_r = 0.5 * (De[1:-1] + De[2:])
+    D_l = 0.5 * (De[1:-1] + De[:-2])
+    return (D_r * (p[2:] - p[1:-1]) - D_l * (p[1:-1] - p[:-2])) / dx**2
 
 
 def _diffuse_2d(phi, D, d, axis, bc_lo='none', bc_hi='none'):
@@ -2533,8 +2579,9 @@ def _apply_bcs(eq, rhs, phi, t):
     Apply all BCs to the assembled rhs.
 
     Dirichlet: overwrite rhs at BC nodes with dvalue/dt (0 for constant BCs).
-    Neumann 1D: the _diffuse_1d stencil used np.roll (periodic ghost); correct
-                the boundary node RHS here using the proper one-sided ghost.
+    Neumann 1D: nothing to do here -- _diffuse_1d applies the Neumann ghost
+                directly, so advection and source terms at the boundary
+                node are kept.
     Neumann 2D: the _diffuse_2d stencil used a zero-gradient ghost (replicates
                 the boundary value), which gives zero normal flux by default.
                 Correct the boundary row here for any non-zero Neumann value.
@@ -2582,16 +2629,6 @@ def _apply_bcs(eq, rhs, phi, t):
         for bc in eq._bcs:
             if bc.kind == 'dirichlet':
                 _set_dirichlet_rhs(rhs, bc, t)
-            elif bc.kind == 'neumann':
-                # _diffuse_1d used np.roll (periodic ghost); fix boundary nodes.
-                g  = bc.get_value(t)
-                dx = eq.dx
-                if bc.mask[0]:     # left:  outward normal = -x  =>  -dphi/dx = g
-                    ghost    = phi[1] - 2.0 * g * dx
-                    rhs[0]   = (phi[1] - phi[0] - (phi[0] - ghost)) / dx**2
-                if bc.mask[-1]:    # right: outward normal = +x  =>  +dphi/dx = g
-                    ghost    = phi[-2] + 2.0 * g * dx
-                    rhs[-1]  = (ghost - phi[-1] - (phi[-1] - phi[-2])) / dx**2
 
     return rhs
 

@@ -232,8 +232,14 @@ eq.set_bc(side='left', kind='dirichlet', value=lambda t: np.sin(t))
 
 ```python
 eq.set_bc(side='right', kind='neumann', value=0.0)   # zero-flux
-eq.set_bc(side='left',  kind='neumann', value=2.5)   # prescribed flux
+eq.set_bc(side='left',  kind='neumann', value=2.5)   # dphi/dn = 2.5
 ```
+
+`value` is the **outward** normal derivative $\partial\phi/\partial n$: on the right wall
+$\partial\phi/\partial n = \partial\phi/\partial x$, on the left wall
+$\partial\phi/\partial n = -\partial\phi/\partial x$. With diffusion $D$, a positive value
+means a flux $D\,\partial\phi/\partial n$ *into* the domain.
+In 1D, a side with no BC set behaves as a zero-flux wall.
 
 #### Periodic
 

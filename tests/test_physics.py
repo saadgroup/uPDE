@@ -50,7 +50,8 @@ def test_exponential_decay(grid_1d_32):
     """
     du/dt = -λu on uniform domain, Neumann BCs, uniform IC = 1.
     Exact solution: u(t) = exp(-λt)  (spatially uniform for all t).
-    Node-wise error < 1e-12 at t = 1.
+    Every node, boundary nodes included, must follow the exact solution to
+    within the integrator tolerance (rtol = 1e-9).
     """
     x   = grid_1d_32
     lam = 3.0
@@ -66,11 +67,11 @@ def test_exponential_decay(grid_1d_32):
                       rtol=1e-9, atol=1e-11)
     assert sol.success
 
-    # The field is spatially uniform: check a single interior node.
-    u_node  = sol.u[16, :]
+    # The field stays spatially uniform, boundary nodes included.
     u_exact = np.exp(-lam * t_eval)
-    max_err = np.max(np.abs(u_node - u_exact))
-    assert max_err < 1e-12, f"Decay max error {max_err:.2e} exceeds 1e-12"
+    max_err = np.max(np.abs(sol.u - u_exact[None, :]))
+    assert max_err < 1e-8, f"Decay max error {max_err:.2e} exceeds 1e-8"
+    assert np.ptp(sol.u, axis=0).max() < 1e-12, "field is not spatially uniform"
 
 
 def test_advection_conserves_mass(grid_1d_64):
